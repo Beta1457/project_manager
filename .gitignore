@@ -1,0 +1,17 @@
+node_modules/
+web/dist/
+*.log
+
+# Your data and secrets: database, uploads, backups, settings and API tokens
+data/
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.*
+!.env.example
+.pm.json
+
+# Local tool and OS files
+.claude/settings.local.json
+.DS_Store

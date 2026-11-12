@@ -1,0 +1,33 @@
+{
+  "name": "project-manager",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Self-hosted project manager (Kanban board, epochs, files, architecture diagrams) with an API and skill for AI coding agents such as Claude Code.",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "prestart": "node scripts/check-node.mjs",
+    "start": "node server/index.ts",
+    "dev": "node --watch server/index.ts",
+    "build": "npm --prefix web run build",
+    "typecheck": "tsc -p tsconfig.json && npm --prefix web run typecheck",
+    "test": "node --test test/",
+    "user": "node scripts/user.ts",
+    "backup": "node scripts/backup.ts",
+    "presetup": "node scripts/check-node.mjs",
+    "setup": "node scripts/setup.ts"
+  },
+  "license": "MIT-0",
+  "dependencies": {
+    "@fastify/cookie": "^11.1.5",
+    "@fastify/multipart": "^10.1.8",
+    "@fastify/static": "^10.1.10",
+    "fastify": "^5.12.8"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2"
+  }
+}
