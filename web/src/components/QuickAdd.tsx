@@ -3,7 +3,8 @@ import { api, V1 } from '../api';
 import { useEpochs, useMeta } from '../hooks';
 import { useMutate } from '../mutate';
 import type { TaskDetail } from '../types';
-import { Sheet, confirmAction } from './Sheet';
+import { askConfirm } from './Confirm';
+import { Sheet } from './Sheet';
 import { MarkdownEditor } from './MarkdownEditor';
 
 interface Props {
@@ -57,7 +58,12 @@ export function QuickAdd({ onClose, onCreated, defaults = {} }: Props) {
   };
 
   return (
-    <Sheet title="New task" onClose={onClose} variant="center" confirmClose={() => !dirty || confirmAction('Discard this new task?')}>
+    <Sheet
+      title="New task"
+      onClose={onClose}
+      variant="center"
+      confirmClose={() => !dirty || askConfirm({ title: 'Discard this new task?', body: 'What you typed will be lost.', confirmLabel: 'Discard' })}
+    >
       <form
         className="stack"
         onSubmit={(e) => {

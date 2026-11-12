@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from 'react';
+import { useMemo, useState, type CSSProperties, type ReactNode } from 'react';
 import {
   DndContext,
   DragOverlay,
@@ -23,6 +23,7 @@ import { useProjectId } from '../projectContext';
 import { useMutate } from '../mutate';
 import type { Task } from '../types';
 import { cx } from '../util';
+import { readWidths, storeWidths, useResizeHandle } from '../resize';
 import { FilterBar, useFilters } from '../components/Filters';
 import { PageHeader, useTaskParam } from '../components/Layout';
 import { TaskCard } from '../components/TaskCard';
@@ -56,6 +57,10 @@ function isLowerHalf(e: DragMoveEvent | DragEndEvent): boolean {
   return Boolean(dragged && over && dragged.top + dragged.height / 2 > over.top + over.height / 2);
 }
 
+/** A column's width on desktop, which people can drag. Saved per project and status in this browser. */
+const COLUMN_WIDTH = { min: 200, max: 600, initial: 290 };
+const columnWidthsKey = (projectId: number) => `pm.board.widths.${projectId}`;
+
 const COL_KEY = 'pm.board.column';
 /** The phone view shows one column at a time; remember the last one picked on this device. */
 const readCol = (): string | null => {
@@ -82,7 +87,10 @@ export function BoardPage() {
 export function BoardView({ scope = {} }: { scope?: TaskFilters }) {
   const [urlFilters] = useFilters();
   const filters = useMemo(() => ({ ...urlFilters, ...scope, status: undefined }), [urlFilters, scope]);
-  const queryKey = tasksKey(useProjectId(), filters);
+  // An epoch's own board: every card is in that epoch, so the cards don't need to say so.
+  const oneEpoch = Boolean(scope.epoch);
+  const projectId = useProjectId();
+  const queryKey = tasksKey(projectId, filters);
   const { data: tasks, isLoading } = useTasks(filters);
   const meta = useMeta().data;
   const qc = useQueryClient();
@@ -94,6 +102,17 @@ export function BoardView({ scope = {} }: { scope?: TaskFilters }) {
   const [dropAfter, setDropAfter] = useState(false);
   const [moving, setMoving] = useState<Task | null>(null);
   const [addingIn, setAddingIn] = useState<string | null>(null);
+  // Read once: switching projects mounts the page afresh (project.tsx).
+  const [columnWidths, setColumnWidths] = useState(() => readWidths(columnWidthsKey(projectId), COLUMN_WIDTH.min, COLUMN_WIDTH.max));
+
+  /** Keeps a column's new width (`undefined`: back to the default) for this project's boards, epochs' included. */
+  const resizeColumn = (status: string, px: number | undefined) => {
+    const next = { ...columnWidths };
+    if (px === undefined) delete next[status];
+    else next[status] = px;
+    setColumnWidths(next);
+    storeWidths(columnWidthsKey(projectId), next);
+  };
 
   const setMobileCol = (s: string) => {
     setMobileColState(s);
@@ -192,16 +211,17 @@ export function BoardView({ scope = {} }: { scope?: TaskFilters }) {
       <DndContext sensors={sensors} collisionDetection={boardCollision} onDragStart={onDragStart} onDragMove={onDragMove} onDragEnd={onDragEnd} onDragCancel={() => setDragging(null)}>
         <div className="board">
           {meta.statuses.map((s) => (
-            <Column key={s.id} id={s.id} label={s.label} color={s.color} count={byStatus[s.id]?.length ?? 0} mobileHidden={activeCol !== s.id} onAdd={() => setAddingIn(s.id)}>
+            <Column key={s.id} id={s.id} label={s.label} color={s.color} count={byStatus[s.id]?.length ?? 0} mobileHidden={activeCol !== s.id}
+              width={columnWidths[s.id]} onResize={(px) => resizeColumn(s.id, px)} onAdd={() => setAddingIn(s.id)}>
               {(byStatus[s.id] ?? []).map((t) => (
                 <DraggableCard key={t.id} task={t} isDragging={dragging?.id === t.id} dropAfter={dropAfter}>
-                  <TaskCard task={t} onOpen={openTask} onStep={step} onMove={setMoving} />
+                  <TaskCard task={t} onOpen={openTask} onStep={step} onMove={setMoving} hideEpoch={oneEpoch} />
                 </DraggableCard>
               ))}
             </Column>
           ))}
         </div>
-        <DragOverlay>{dragging && <TaskCard task={dragging} onOpen={() => {}} className="drag-overlay" />}</DragOverlay>
+        <DragOverlay>{dragging && <TaskCard task={dragging} onOpen={() => {}} className="drag-overlay" hideEpoch={oneEpoch} />}</DragOverlay>
       </DndContext>
       {moving && <StatusPicker current={moving.status} onClose={() => setMoving(null)} onPick={(s) => moveTask(moving, s, null)} />}
       {addingIn && (
@@ -211,12 +231,30 @@ export function BoardView({ scope = {} }: { scope?: TaskFilters }) {
   );
 }
 
-function Column({ id, label, color, count, mobileHidden, onAdd, children }: {
-  id: string; label: string; color: string; count: number; mobileHidden: boolean; onAdd: () => void; children: ReactNode;
+function Column({ id, label, color, count, mobileHidden, width, onResize, onAdd, children }: {
+  id: string; label: string; color: string; count: number; mobileHidden: boolean;
+  /** The saved width, if it was changed. */
+  width: number | undefined;
+  onResize: (px: number | undefined) => void;
+  onAdd: () => void; children: ReactNode;
 }) {
   const { setNodeRef, isOver } = useDroppable({ id: `col-${id}` });
+  // While the handle is dragged only this column re-renders; the board hears of the new width when it is let go.
+  const [dragWidth, setDragWidth] = useState<number | null>(null);
+  const shown = dragWidth ?? width ?? COLUMN_WIDTH.initial;
+  const resizer = useResizeHandle({
+    ...COLUMN_WIDTH,
+    width: shown,
+    edge: 1,
+    onChange: setDragWidth,
+    onCommit: (px) => {
+      setDragWidth(null);
+      onResize(px === COLUMN_WIDTH.initial ? undefined : px);
+    },
+  });
   return (
-    <section ref={setNodeRef} className={cx('column', isOver && 'drop-over', mobileHidden && 'mobile-hidden')}>
+    <section ref={setNodeRef} className={cx('column', isOver && 'drop-over', mobileHidden && 'mobile-hidden')}
+      style={shown === COLUMN_WIDTH.initial ? undefined : ({ '--col-w': `${shown}px` } as CSSProperties)}>
       <div className="column-head" style={{ borderTopColor: color, background: color + '1a' }}>
         <span className="grow">{label}</span>
         <span className="muted small">{count}</span>
@@ -226,6 +264,8 @@ function Column({ id, label, color, count, mobileHidden, onAdd, children }: {
         {count === 0 && <div className="muted small" style={{ textAlign: 'center', padding: 12 }}>No tasks</div>}
       </div>
       <button className="btn btn-ghost btn-sm add-inline" onClick={onAdd}>+ Add task</button>
+      {/* In the gap to the right of the column. Desktop only (styles.css). */}
+      <div className="column-resizer" aria-label={`Resize the ${label} column`} {...resizer} />
     </section>
   );
 }

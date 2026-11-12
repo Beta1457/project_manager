@@ -79,16 +79,41 @@ If tests fail and you cannot fix them, leave the task In Progress, add a note de
 
 ## Architecture diagram
 
-When you add a new system/module/service or change how major systems connect, update the diagram (labels are matched case-insensitively):
+When you add a new system/module/service or change how major systems connect, update the diagram. The web app arranges it automatically, so never set x/y or sizes. Boxes are named by label (case-insensitive) or id.
 
 ```
-pm diagram show
-pm diagram add-node --label "AuthService" --layer services --desc "Sign-in, sessions and tokens" --link-task APP-12
-pm diagram connect "AuthService" "Database" --label "reads users"
-pm diagram update-node "AuthService" --desc "..."
+pm diagram show                                     # boxes as a tree (with ids), then the arrows
+pm diagram add-node --label "Combat" --layer gameplay --path src/combat/ --role "Runs fights" --link-task APP-12
+pm diagram add-node --label "DamageCalc" --parent "Combat" --path src/combat/DamageCalc.cs --role "Works out hit damage" --weight 420
+pm diagram connect "DamageCalc" "Stats" --label "reads" --count 3
+pm diagram update-node "DamageCalc" --role "..."    # "none" clears a field; --parent none moves it to the top level
+pm diagram update-edge "DamageCalc" "Stats" --count 5
+pm diagram rm-node "Combat" --with-children         # without --with-children the boxes inside move up a level
 ```
 
-Layers: core, gameplay, ui, data, services, tools, external. Keep labels as the code's class/module names. Don't add nodes for small helpers.
+- **Groups:** a box with `--parent` sits inside that box, which becomes a group the user can open and close. Use one group per system (its folder or namespace) with its main classes inside; groups can nest up to 6 levels. Labels only need to be unique inside a group, so two systems can each have a "Config".
+- **Fields:** `--role` is one line on what it does; `--path` is its file or folder; `--weight` makes busier boxes bigger (use one measure everywhere, e.g. lines of code); `--layer` colours it: core, gameplay, ui, data, services, tools, external.
+- **Arrows** point from the box that uses something to what it uses; `--count` says how many references one arrow stands for. Between two systems, add either the class-to-class arrows (a closed group shows them added up, e.g. "uses ×42") or one arrow between the two groups with a count, not both. Big groups also add up the arrows leaving them at their edge; selecting a box shows its own.
+- **Many changes** (a first build, a restructure, or more than about 20 boxes or arrows): write a JSON file and import it in one save instead of running many commands.
+
+```json
+{
+  "nodes": [
+    { "id": "combat", "label": "Combat", "layer": "gameplay", "path": "src/combat/", "role": "Runs fights" },
+    { "id": "damage-calc", "label": "DamageCalc", "parent": "combat", "path": "src/combat/DamageCalc.cs", "weight": 420 },
+    { "id": "stats", "label": "Stats", "layer": "data", "path": "src/data/Stats.cs" }
+  ],
+  "edges": [{ "source": "damage-calc", "target": "stats", "label": "reads", "count": 3 }]
+}
+```
+
+```
+pm diagram import <tmp.json>          # dry run: prints what would be added, updated and removed
+pm diagram import <tmp.json> --yes    # applies it
+pm diagram export --out <tmp.json>    # the current diagram in the same format
+```
+
+Import matches boxes by id, then by label (in a parent with the same label first) and keeps the fields a box leaves out. It only adds and updates; `--replace` also removes every box and arrow the file doesn't list, so read its dry run first. Limits: 2000 boxes, 5000 arrows. Keep labels as the code's class/module names. Don't add boxes for small helpers.
 
 ## Organising: epochs, folders and the explorer
 
@@ -159,3 +184,5 @@ In API paths, use task keys (`APP-12`): a bare number there is the task's intern
 - Never invent task keys — always read them from command output.
 - If the server is unreachable, continue the coding work, tell the user tracking failed, and list the `pm` commands they (or you, later) should run to catch up.
 - Use `--json` when you need to parse output programmatically.
+
+<!-- Part of Project Manager. Copyright (c) 2026 Bettafish Games, LLC. MIT License. -->

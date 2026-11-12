@@ -3,12 +3,13 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, V1 } from '../api';
 import { useEpoch, useEpochs, useFolders } from '../hooks';
 import { useMutate } from '../mutate';
-import type { Epoch } from '../types';
-import { formatMinutes } from '../util';
+import type { Epoch, Folder } from '../types';
+import { formatMinutes, plural } from '../util';
+import { askConfirm, type ConfirmOptions } from '../components/Confirm';
 import { Markdown, ProgressBar, Spinner } from '../components/Bits';
 import { FilterBar, folderPath } from '../components/Filters';
 import { PageHeader } from '../components/Layout';
-import { Sheet, confirmAction } from '../components/Sheet';
+import { Sheet } from '../components/Sheet';
 import { TimePanel } from '../components/TimePanel';
 import { MarkdownEditor } from '../components/MarkdownEditor';
 import { BoardView } from './Board';
@@ -112,6 +113,35 @@ export function EpochDetailPage() {
 /** Exact, re-parseable estimate text: 85 -> "1h25m" (never a rounded "1.4h"). */
 const fmtEstimate = (m: number | null) => (!m ? '' : m >= 60 ? `${Math.floor(m / 60)}h${m % 60 ? `${m % 60}m` : ''}` : `${m}m`);
 
+/**
+ * The question asked before an epoch is deleted, from its form or from the Explorer. The server keeps the
+ * tasks and moves them to the epoch's folder, but deletes time logged directly on the epoch. Without
+ * `loggedDirectMinutes` (not known yet) the text covers that case anyway.
+ */
+export function epochDeleteQuestion(
+  epoch: { name: string; total: number; folderId: number | null; loggedDirectMinutes?: number },
+  folders: Folder[],
+): ConfirmOptions {
+  const dest = epoch.folderId === null ? 'the Inbox (unfiled tasks)' : `the folder "${folderPath(folders, epoch.folderId)}"`;
+  const direct =
+    epoch.loggedDirectMinutes === undefined
+      ? 'Any time logged directly on the epoch is deleted with it.'
+      : epoch.loggedDirectMinutes > 0
+        ? `The ${formatMinutes(epoch.loggedDirectMinutes)} logged directly on the epoch is deleted with it.`
+        : '';
+  return {
+    title: 'Delete epoch?',
+    body: [
+      `"${epoch.name}" will be deleted.`,
+      epoch.total ? `Its ${plural(epoch.total, 'task')} and their logged time are kept and move to ${dest}.` : '',
+      direct,
+    ]
+      .filter(Boolean)
+      .join(' '),
+    confirmLabel: 'Delete epoch',
+  };
+}
+
 export function EpochForm({ epoch, onClose, folderId }: { epoch: Epoch | null; onClose: () => void; folderId?: number | null }) {
   const mutate = useMutate();
   const navigate = useNavigate();
@@ -155,7 +185,8 @@ export function EpochForm({ epoch, onClose, folderId }: { epoch: Epoch | null; o
     if (ok) onClose();
   };
   const remove = async () => {
-    if (!epoch || !confirmAction(`Delete epoch "${epoch.name}"? Its tasks (and their time) are kept and moved to the epoch's folder; time logged directly on the epoch is removed.`)) return;
+    if (!epoch) return;
+    if (!(await askConfirm(epochDeleteQuestion(epoch, folders)))) return;
     if (await mutate(() => api.del(`${V1}/epochs/${epoch.id}?deleteTime=true`), ['epochs', 'tasks'], 'Epoch deleted')) {
       onClose();
       navigate('/epochs');
@@ -163,7 +194,7 @@ export function EpochForm({ epoch, onClose, folderId }: { epoch: Epoch | null; o
   };
 
   return (
-    <Sheet title={epoch ? 'Edit epoch' : 'New epoch'} onClose={onClose} variant="center" confirmClose={() => !dirty || confirmAction('Discard your changes?')}>
+    <Sheet title={epoch ? 'Edit epoch' : 'New epoch'} onClose={onClose} variant="center" confirmClose={() => !dirty || askConfirm({ title: 'Discard your changes?', body: 'Your edits to this epoch will be lost.', confirmLabel: 'Discard' })}>
       <form className="stack" onSubmit={(e) => { e.preventDefault(); void save(); }}>
         <label className="field">Name<input autoFocus value={name} onChange={(e) => setName(e.target.value)} required /></label>
         <div className="field" style={{ display: 'grid', gap: 4 }}><span className="small muted" style={{ fontWeight: 600 }}>Description</span><MarkdownEditor value={description} onChange={setDescription} rows={4} /></div>

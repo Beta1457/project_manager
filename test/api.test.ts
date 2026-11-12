@@ -270,6 +270,264 @@ test('diagrams: granular node/edge ops and optimistic concurrency', async () => 
   assert.equal(after.edges.length, 0);
 });
 
+test('diagrams: groups, sizes, path, role, weight and arrow counts', async () => {
+  const id = (await call('POST', '/api/v1/diagrams', { name: 'Groups' })).body.id;
+  const url = `/api/v1/diagrams/${id}`;
+  const combat = await call(
+    'POST',
+    `${url}/nodes`,
+    { label: 'Combat', path: 'src/combat/', role: 'Runs fights\nand more', weight: 1200, width: 10, height: 99999 },
+    'token',
+  );
+  assert.equal(combat.status, 201, JSON.stringify(combat.body));
+  assert.deepEqual(
+    [combat.body.path, combat.body.role, combat.body.weight, combat.body.width, combat.body.height],
+    ['src/combat/', 'Runs fights', 1200, 40, 4000],
+  );
+
+  const inner = await call('POST', `${url}/nodes`, { label: 'Damage', parent: 'combat' }, 'token');
+  assert.equal(inner.status, 201);
+  assert.equal(inner.body.parent, combat.body.id);
+  assert.deepEqual([inner.body.x, inner.body.y], [20, 56]); // clear of the group's header
+  // A label only has to be unique among the boxes next to it...
+  const top = await call('POST', `${url}/nodes`, { label: 'Damage' }, 'token');
+  assert.equal(top.status, 201);
+  assert.equal(top.body.parent, undefined);
+  assert.equal((await call('POST', `${url}/nodes`, { label: 'damage', parent: combat.body.id }, 'token')).status, 409);
+  // ...so a label two boxes share can't name one of them.
+  assert.equal((await call('PATCH', `${url}/nodes/Damage`, { role: 'x' }, 'token')).status, 409);
+  assert.equal((await call('POST', `${url}/nodes`, { label: 'Orphan', parent: 'Nope' }, 'token')).status, 404);
+  assert.equal((await call('POST', `${url}/nodes`, { label: 'Long id', id: 'x'.repeat(129) }, 'token')).status, 400);
+
+  // null clears a field, a missing one stays, a wrong type is refused.
+  const cleared = await call('PATCH', `${url}/nodes/Combat`, { width: null, weight: null, role: null }, 'token');
+  assert.equal(cleared.status, 200);
+  assert.deepEqual(
+    [cleared.body.width, cleared.body.weight, cleared.body.role, cleared.body.height, cleared.body.path],
+    [undefined, undefined, undefined, 4000, 'src/combat/'],
+  );
+  assert.equal((await call('PATCH', `${url}/nodes/Combat`, { weight: 'heavy' }, 'token')).status, 400);
+
+  // No loops, nothing inside itself, and at most six groups deep.
+  assert.equal((await call('PATCH', `${url}/nodes/Combat`, { parent: inner.body.id }, 'token')).status, 400);
+  assert.equal((await call('PATCH', `${url}/nodes/Combat`, { parent: 'Combat' }, 'token')).status, 400);
+  let parent = combat.body.id;
+  for (let level = 2; level <= 7; level++) {
+    const r = await call('POST', `${url}/nodes`, { label: `Level ${level}`, parent }, 'token');
+    assert.equal(r.status, 201, `level ${level}: ${JSON.stringify(r.body)}`);
+    parent = r.body.id;
+  }
+  assert.equal((await call('POST', `${url}/nodes`, { label: 'Too deep', parent }, 'token')).status, 400);
+
+  // Arrows: never between a box and a group it is in; joining the same two boxes again returns the arrow there is.
+  assert.equal((await call('POST', `${url}/edges`, { source: inner.body.id, target: 'Combat' }, 'token')).status, 400);
+  const e = await call('POST', `${url}/edges`, { source: top.body.id, target: 'Combat', label: 'calls', count: 42 }, 'token');
+  assert.equal(e.status, 201);
+  assert.equal(e.body.count, 42);
+  assert.equal((await call('POST', `${url}/edges`, { source: top.body.id, target: 'Combat' }, 'token')).body.id, e.body.id);
+  const reset = await call('PATCH', `${url}/edges/${e.body.id}`, { count: null }, 'token');
+  assert.deepEqual([reset.status, reset.body.count, reset.body.label], [200, undefined, 'calls']);
+  const relabelled = await call('PATCH', `${url}/edges/${e.body.id}`, { label: 'hits', count: 3 }, 'token');
+  assert.deepEqual([relabelled.body.label, relabelled.body.count], ['hits', 3]);
+  assert.equal((await call('PATCH', `${url}/edges/nope`, { count: 2 }, 'token')).status, 404);
+
+  const listed = (await call('GET', '/api/v1/diagrams')).body;
+  assert.equal(listed.limits.depth, 6);
+  const row = listed.diagrams.find((x: Json) => x.id === id);
+  assert.deepEqual([row.nodeCount, row.edgeCount], [9, 1]);
+});
+
+test('diagrams: older pages keep the new fields, schema 2 saves exactly what is sent, settings stay put', async () => {
+  const id = (await call('POST', '/api/v1/diagrams', { name: 'Compat' })).body.id;
+  const url = `/api/v1/diagrams/${id}`;
+  const a = (await call('POST', `${url}/nodes`, { label: 'A', width: 300, path: 'src/a/', role: 'Does A', weight: 10 })).body;
+  const g = (await call('POST', `${url}/nodes`, { label: 'G' })).body;
+  const c = (await call('POST', `${url}/nodes`, { label: 'C', parent: 'G' })).body;
+  const e = (await call('POST', `${url}/edges`, { source: 'A', target: 'G', count: 5 })).body;
+
+  const set = await call('PATCH', url, { settings: { layout: 'manual', direction: 'RIGHT' } });
+  assert.deepEqual(set.body.settings, { layout: 'manual', direction: 'RIGHT' });
+  assert.equal((await call('PATCH', url, { settings: { layout: 'sideways' } })).status, 400);
+
+  // What a page from before groups sends: no sizes, parents, path, role, weight, counts or settings.
+  const old = (n: Json) => ({ id: n.id, label: n.label, description: n.description, layer: n.layer, x: n.x, y: n.y, link: null });
+  let d = (await call('GET', url)).body;
+  const legacy = await call('PUT', url, {
+    version: d.version,
+    nodes: d.nodes.map(old),
+    edges: [
+      ...d.edges.map((x: Json) => ({ id: x.id, source: x.source, target: x.target, label: x.label })),
+      { id: 'into-own-group', source: c.id, target: g.id, label: '' },
+    ],
+  });
+  assert.equal(legacy.status, 200, JSON.stringify(legacy.body));
+  d = legacy.body;
+  const A = d.nodes.find((n: Json) => n.id === a.id);
+  assert.deepEqual([A.width, A.path, A.role, A.weight], [300, 'src/a/', 'Does A', 10]);
+  assert.equal(d.nodes.find((n: Json) => n.id === c.id).parent, g.id);
+  assert.deepEqual(d.edges.map((x: Json) => [x.id, x.count]), [[e.id, 5]]); // the arrow into its own group is dropped
+  assert.deepEqual(d.settings, { layout: 'manual', direction: 'RIGHT' });
+
+  // An older page that deleted the group: what was inside it moves to the top level.
+  const noGroup = await call('PUT', url, { version: d.version, nodes: d.nodes.filter((n: Json) => n.id !== g.id).map(old), edges: [] });
+  assert.equal(noGroup.status, 200);
+  assert.equal(noGroup.body.nodes.find((n: Json) => n.id === c.id).parent, undefined);
+
+  // schema 2: the body is the whole diagram. A field left out is cleared, and what doesn't fit is refused.
+  d = noGroup.body;
+  const full = await call('PUT', url, { version: d.version, schema: 2, nodes: d.nodes.map(old), edges: [], settings: { layout: 'auto' } });
+  assert.equal(full.status, 200);
+  assert.equal(full.body.nodes.find((n: Json) => n.id === a.id).width, undefined);
+  assert.deepEqual(full.body.settings, { layout: 'auto', direction: 'RIGHT' });
+  d = full.body;
+  const nested = [...d.nodes.map(old), { id: 'g2', label: 'G2', x: 0, y: 0 }, { id: 'c2', label: 'C2', parent: 'g2', x: 0, y: 0 }];
+  const intoGroup = [{ id: 'x', source: 'c2', target: 'g2', label: '' }];
+  assert.equal((await call('PUT', url, { version: d.version, schema: 2, nodes: nested, edges: intoGroup })).status, 400);
+  const twice = [...nested, { id: 'c2', label: 'Again', x: 0, y: 0 }];
+  assert.equal((await call('PUT', url, { version: d.version, schema: 2, nodes: twice, edges: [] })).status, 400);
+
+  // Changing one box or arrow keeps the settings.
+  await call('PATCH', url, { settings: { layout: 'manual' } });
+  await call('POST', `${url}/nodes`, { label: 'D' });
+  await call('PATCH', `${url}/nodes/D`, { role: 'Does D' });
+  const de = (await call('POST', `${url}/edges`, { source: 'D', target: 'A' })).body;
+  await call('PATCH', `${url}/edges/${de.id}`, { count: 2 });
+  await call('DELETE', `${url}/edges/${de.id}`);
+  await call('DELETE', `${url}/nodes/D`);
+  assert.deepEqual((await call('GET', url)).body.settings, { layout: 'manual', direction: 'RIGHT' });
+});
+
+test('diagrams: deleting a group moves what is inside up a level, or deletes all of it', async () => {
+  const id = (await call('POST', '/api/v1/diagrams', { name: 'Delete groups' })).body.id;
+  const url = `/api/v1/diagrams/${id}`;
+  await call('POST', `${url}/nodes`, { label: 'G', x: 100, y: 200 });
+  const c1 = (await call('POST', `${url}/nodes`, { label: 'C1', parent: 'G', x: 20, y: 56 })).body;
+  await call('POST', `${url}/nodes`, { label: 'C2', parent: 'G' });
+  const g2 = (await call('POST', `${url}/nodes`, { label: 'G2', parent: 'G' })).body;
+  await call('POST', `${url}/nodes`, { label: 'C3', parent: 'G2' });
+  await call('POST', `${url}/nodes`, { label: 'X' });
+  await call('POST', `${url}/edges`, { source: 'C1', target: 'C2' });
+  await call('POST', `${url}/edges`, { source: 'C3', target: 'X' });
+  await call('POST', `${url}/edges`, { source: 'X', target: 'G' });
+
+  assert.deepEqual((await call('DELETE', `${url}/nodes/G`)).body, { ok: true, removed: 1 });
+  let d = (await call('GET', url)).body;
+  const C1 = d.nodes.find((n: Json) => n.id === c1.id);
+  assert.deepEqual([C1.parent, C1.x, C1.y], [undefined, 120, 256]); // the same place on the canvas
+  assert.equal(d.nodes.find((n: Json) => n.id === g2.id).parent, undefined);
+  assert.equal(d.nodes.find((n: Json) => n.label === 'C3').parent, g2.id);
+  assert.equal(d.edges.length, 2); // only the arrow to G went
+
+  // Moving up must not put two boxes with the same label side by side.
+  await call('POST', `${url}/nodes`, { label: 'H' });
+  await call('POST', `${url}/nodes`, { label: 'X', parent: 'H' });
+  assert.equal((await call('DELETE', `${url}/nodes/H`)).status, 409);
+  assert.deepEqual((await call('DELETE', `${url}/nodes/H?withChildren=true`)).body, { ok: true, removed: 2 });
+
+  assert.deepEqual((await call('DELETE', `${url}/nodes/G2?withChildren=true`)).body, { ok: true, removed: 2 });
+  d = (await call('GET', url)).body;
+  assert.deepEqual(d.nodes.map((n: Json) => n.label).sort(), ['C1', 'C2', 'X']);
+  assert.equal(d.edges.length, 1); // C1 -> C2; the arrow from C3 went with it
+});
+
+test('diagrams: import merges or replaces many boxes and arrows in one save', async () => {
+  const id = (await call('POST', '/api/v1/diagrams', { name: 'Import' })).body.id;
+  const url = `/api/v1/diagrams/${id}`;
+  const combat = (await call('POST', `${url}/nodes`, { label: 'Combat', x: 500, y: 600, width: 320 })).body;
+  const combatUtils = (await call('POST', `${url}/nodes`, { label: 'Utils', parent: 'Combat' })).body;
+  const ui = (await call('POST', `${url}/nodes`, { label: 'UI' })).body;
+  await call('POST', `${url}/nodes`, { label: 'Utils', parent: 'UI' });
+  await call('POST', `${url}/nodes`, { label: 'Save' });
+  const writes = (await call('POST', `${url}/edges`, { source: 'Combat', target: 'Save', label: 'writes', count: 4 })).body;
+  const before = (await call('GET', url)).body;
+
+  // Merge, matching by label (in the same group first). Fields left out stay; an arrow listed twice adds up.
+  const merged = await call(
+    'POST',
+    `${url}/import`,
+    {
+      nodes: [{ label: 'Combat', role: 'Runs fights' }, { label: 'Utils', parent: 'Combat', path: 'src/combat/utils/' }, { label: 'Audio' }],
+      edges: [
+        { source: 'Combat', target: 'Audio' },
+        { source: 'combat', target: 'audio', count: 2 },
+        { source: 'Audio', target: 'Save', label: 'reads' },
+      ],
+    },
+    'token',
+  );
+  assert.equal(merged.status, 200, JSON.stringify(merged.body));
+  assert.deepEqual(merged.body.nodes, { added: 1, updated: 2, removed: 0 });
+  assert.deepEqual(merged.body.edges, { added: 2, updated: 0, removed: 0 });
+  assert.equal(merged.body.version, before.version + 1);
+  let d = (await call('GET', url)).body;
+  const find = (label: string, parent?: string) => d.nodes.find((n: Json) => n.label === label && n.parent === parent);
+  const C = find('Combat');
+  assert.deepEqual([C.id, C.x, C.y, C.width, C.role], [combat.id, 500, 600, 320, 'Runs fights']);
+  assert.equal(find('Utils', combat.id).path, 'src/combat/utils/');
+  assert.equal(find('Utils', ui.id).path, undefined);
+  const audio = find('Audio');
+  assert.equal(d.edges.find((e: Json) => e.source === combat.id && e.target === audio.id).count, 3);
+  assert.equal(d.edges.find((e: Json) => e.id === writes.id).count, 4);
+
+  // A label several boxes share needs an id, as does a reference to one. Nothing is saved when an import fails.
+  assert.equal((await call('POST', `${url}/import`, { nodes: [{ label: 'Utils', role: 'x' }] }, 'token')).status, 409);
+  assert.equal((await call('POST', `${url}/import`, { nodes: [{ label: 'Z' }], edges: [{ source: 'Z', target: 'Utils' }] }, 'token')).status, 409);
+  assert.equal((await call('POST', `${url}/import`, { nodes: [{ id: 'q', label: 'Q' }, { id: 'q', label: 'R' }] }, 'token')).status, 400);
+  assert.equal((await call('POST', `${url}/import`, { nodes: [], edges: [{ source: 'Combat', target: 'Nowhere' }] }, 'token')).status, 400);
+  assert.equal((await call('POST', `${url}/import`, { version: before.version, nodes: [] }, 'token')).status, 409);
+  assert.equal((await call('GET', url)).body.version, d.version);
+
+  // A dry run reports and changes nothing. "updated" counts real changes: Combat keeps every field it has.
+  const dry = await call('POST', `${url}/import`, { mode: 'replace', dryRun: true, nodes: [{ label: 'Combat' }] }, 'token');
+  assert.deepEqual(dry.body.nodes, { added: 0, updated: 0, removed: d.nodes.length - 1 });
+  assert.deepEqual(dry.body.edges, { added: 0, updated: 0, removed: d.edges.length });
+  const relabel = await call('POST', `${url}/import`, { dryRun: true, nodes: [{ label: 'Combat', role: 'Runs battles' }] }, 'token');
+  assert.deepEqual(relabel.body.nodes, { added: 0, updated: 1, removed: 0 });
+  // Importing the diagram's own export changes nothing.
+  const same = await call('POST', `${url}/import`, { dryRun: true, nodes: d.nodes, edges: d.edges }, 'token');
+  assert.deepEqual([same.body.nodes, same.body.edges], [{ added: 0, updated: 0, removed: 0 }, { added: 0, updated: 0, removed: 0 }]);
+  assert.equal(same.body.settingsChanged, false);
+  // Settings count as a change too (the export carries them).
+  const turn = d.settings.direction === 'DOWN' ? 'RIGHT' : 'DOWN';
+  const turned = await call('POST', `${url}/import`, { dryRun: true, nodes: d.nodes, edges: d.edges, settings: { ...d.settings, direction: turn } }, 'token');
+  assert.deepEqual([turned.body.nodes.updated, turned.body.edges.updated, turned.body.settingsChanged], [0, 0, true]);
+  assert.equal((await call('POST', `${url}/import`, { dryRun: true, nodes: [], settings: d.settings }, 'token')).body.settingsChanged, false);
+  assert.equal((await call('GET', url)).body.version, d.version);
+
+  // Replace with an export: what is listed stays exactly as it is; the rest goes.
+  const kept = d.nodes.filter((n: Json) => n.label !== 'Save');
+  const replaced = await call(
+    'POST',
+    `${url}/import`,
+    { mode: 'replace', version: d.version, nodes: kept, edges: d.edges.filter((e: Json) => e.target === audio.id) },
+    'token',
+  );
+  assert.equal(replaced.status, 200, JSON.stringify(replaced.body));
+  assert.deepEqual(replaced.body.nodes, { added: 0, updated: 0, removed: 1 });
+  assert.deepEqual(replaced.body.edges, { added: 0, updated: 0, removed: 2 });
+  d = (await call('GET', url)).body;
+  assert.deepEqual(d.nodes, kept);
+
+  // An id the diagram doesn't have, on a box matched by label, becomes that box's id; what pointed at it follows.
+  const renamed = await call('POST', `${url}/import`, { nodes: [{ id: 'combat', label: 'Combat' }] }, 'token');
+  assert.deepEqual(renamed.body.nodes, { added: 0, updated: 1, removed: 0 });
+  d = (await call('GET', url)).body;
+  assert.equal(find('Combat').id, 'combat');
+  assert.equal(find('Utils', 'combat').id, combatUtils.id);
+  const arrow = d.edges.find((e: Json) => e.target === audio.id);
+  assert.deepEqual([arrow.source, arrow.count], ['combat', 3]);
+
+  // An arrow listed once without a count keeps the count it has.
+  await call('POST', `${url}/import`, { nodes: [], edges: [{ source: 'combat', target: 'Audio', label: 'plays' }] }, 'token');
+  const relabelled = (await call('GET', url)).body.edges.find((e: Json) => e.target === audio.id);
+  assert.deepEqual([relabelled.label, relabelled.count], ['plays', 3]);
+
+  // The limits count the boxes already there.
+  const over = await call('POST', `${url}/import`, { nodes: Array.from({ length: 1996 }, (_, i) => ({ label: `Box ${i}` })) }, 'token');
+  assert.equal(over.status, 400);
+  assert.match(over.body.error, /2000/);
+});
+
 test('files: upload, safe content type, move, delete', async () => {
   const folder = (await call('POST', '/api/v1/folders', { name: 'Docs' })).body;
   const boundary = '----pmtest';
@@ -805,6 +1063,10 @@ test('projects are private: another account gets "not found" for everything in t
     ['GET', `/api/v1/diagrams/${diagram.id}`],
     ['PUT', `/api/v1/diagrams/${diagram.id}`, { nodes: [], edges: [] }],
     ['POST', `/api/v1/diagrams/${diagram.id}/nodes`, { label: 'X' }],
+    ['DELETE', `/api/v1/diagrams/${diagram.id}/nodes/X`],
+    ['PATCH', `/api/v1/diagrams/${diagram.id}`, { name: 'pwned' }],
+    ['POST', `/api/v1/diagrams/${diagram.id}/import`, { nodes: [{ label: 'pwned' }] }],
+    ['PATCH', `/api/v1/diagrams/${diagram.id}/edges/x`, { label: 'pwned' }],
     ['DELETE', `/api/v1/diagrams/${diagram.id}`],
     ['PATCH', `/api/v1/categories/${category.id}`, { name: 'pwned' }],
     ['DELETE', `/api/v1/categories/${category.id}`],

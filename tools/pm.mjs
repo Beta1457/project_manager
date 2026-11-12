@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+// Part of Project Manager. Copyright (c) 2026 Bettafish Games, LLC.
+// SPDX-License-Identifier: MIT (the full text is in Project Manager's LICENSE file). Keep this notice in copies.
+//
 // pm — command-line client for the Project Manager API.
 // Zero dependencies; requires Node 18+.
 //
@@ -60,7 +63,7 @@ function authHeaders() {
 // ------------------------------------------------------------------ args ----
 
 const REPEATABLE = new Set(['check']);
-const BOOLEAN = new Set(['json', 'undo', 'help', 'remove', 'delete-time']);
+const BOOLEAN = new Set(['json', 'undo', 'help', 'remove', 'delete-time', 'replace', 'yes', 'with-children']);
 
 function parseArgs(argv) {
   const pos = [];
@@ -246,7 +249,21 @@ function printTask(t, detail = false) {
   }
 }
 
+/** "1 box", "3 boxes". */
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+
 const out = (flags, data, human) => (flags.json ? console.log(JSON.stringify(data, null, 2)) : human(data));
+
+/** What a diagram import changes: "add 7 boxes and 8 arrows, update 1 box" ("added …" once done), or "change nothing". */
+function importSummary(r, done) {
+  const count = (n, one, many) => (n ? plural(n, one, many) : '');
+  const parts = [['added', 'add'], ['updated', 'update'], ['removed', 'remove']].flatMap(([key, verb]) => {
+    const what = [count(r.nodes[key], 'box', 'boxes'), count(r.edges[key], 'arrow', 'arrows')].filter(Boolean);
+    return what.length ? [`${done ? key : verb} ${what.join(' and ')}`] : [];
+  });
+  if (r.settingsChanged) parts.push(`${done ? 'changed' : 'change'} the layout settings`);
+  return parts.length ? parts.join(', ') : done ? 'nothing changed' : 'change nothing';
+}
 
 function taskBody(flags) {
   const body = {};
@@ -529,11 +546,21 @@ const commands = {
   },
 
   async diagram([sub, ...rest], flags) {
-    const diagramId = async () => {
-      if (flags.diagram) return flags.diagram;
+    /** A diagram by id or (case-insensitive) name; with none given, the first one. */
+    const resolveDiagram = async (ref) => {
+      if (ref !== undefined && /^\d+$/.test(String(ref))) return Number(ref);
       const { diagrams } = await get('/api/v1/diagrams');
+      if (ref !== undefined && ref !== '') return pickByName(diagrams, ref, 'diagram', (d) => d.name);
       if (!diagrams.length) fail('No diagrams exist. Create one: pm diagram create --name "..."');
       return diagrams[0].id;
+    };
+    let chosen;
+    const base = async () => `/api/v1/diagrams/${(chosen ??= await resolveDiagram(flags.diagram))}`;
+    const boxRef = () => encodeURIComponent(need(rest.join(' '), 'box label or id'));
+    const num = (v, what) => {
+      const n = Number(v);
+      if (v === true || v === '' || !Number.isFinite(n)) fail(`${what} must be a number`);
+      return n;
     };
     const link = async () => {
       // Diagram links store the task's id; look it up from the key.
@@ -542,57 +569,172 @@ const commands = {
       if (flags['link'] === 'none') return null;
       return undefined;
     };
+    /** Box fields from the flags. "none" clears one (--parent none puts the box at the top level). */
+    const boxBody = async () => {
+      const body = {};
+      const clear = (v) => (v === 'none' || v === '' ? null : v);
+      if (flags.label !== undefined) body.label = flags.label;
+      if (flags.layer !== undefined) body.layer = flags.layer;
+      const desc = readDesc(flags);
+      if (desc !== undefined) body.description = desc;
+      for (const k of ['parent', 'path', 'role']) if (flags[k] !== undefined) body[k] = clear(flags[k]);
+      for (const k of ['weight', 'width', 'height']) if (flags[k] !== undefined) body[k] = clear(flags[k]) === null ? null : num(flags[k], `--${k}`);
+      const l = await link();
+      if (l !== undefined) body.link = l;
+      return body;
+    };
+    /** An arrow by its id, or by the two boxes it joins: "From box" "To box" (ids or labels). */
+    const arrowId = async () => {
+      if (rest.length <= 1) return need(rest[0], 'arrow id (or the two boxes it joins, in quotes)');
+      if (rest.length > 2) fail('Give the arrow id, or the two boxes it joins, each in quotes: "From box" "To box"');
+      const d = await get(await base());
+      const box = (ref) => {
+        const byId = d.nodes.find((n) => n.id === ref);
+        if (byId) return byId;
+        const named = d.nodes.filter((n) => n.label.toLowerCase() === ref.toLowerCase());
+        if (named.length === 1) return named[0];
+        fail(named.length ? `Several boxes are labelled "${ref}" (ids ${named.map((n) => n.id).join(', ')}). Use an id.` : `No box "${ref}" in ${d.name}.`);
+      };
+      const [s, t] = [box(rest[0]), box(rest[1])];
+      const e = d.edges.find((x) => x.source === s.id && x.target === t.id);
+      if (!e) fail(`No arrow from "${s.label}" to "${t.label}" (arrows have a direction).`);
+      return e.id;
+    };
+    const arrowText = (e) => `${e.label ? ` "${e.label}"` : ''}${e.count > 1 ? ` ×${e.count}` : ''}`;
+
     switch (sub) {
       case 'list':
       case 'ls': {
         const r = await get('/api/v1/diagrams');
-        return out(flags, r, () => { r.diagrams.forEach((d) => console.log(`${d.id}  ${d.name}`)); console.log(`Layers: ${r.layers.join(', ')}`); });
+        return out(flags, r, () => {
+          r.diagrams.forEach((d) => console.log(`${d.id}  ${d.name}  (${plural(d.nodeCount, 'box', 'boxes')}, ${plural(d.edgeCount, 'arrow', 'arrows')})`));
+          console.log(`Layers: ${r.layers.join(', ')}`);
+        });
       }
       case 'show': {
-        const d = await get(`/api/v1/diagrams/${rest[0] ?? (await diagramId())}`);
+        const d = await get(`/api/v1/diagrams/${await resolveDiagram(rest.length ? rest.join(' ') : flags.diagram)}`);
         return out(flags, d, () => {
-          console.log(`${d.name} (v${d.version})`);
+          const s = d.settings ?? {};
+          console.log(`${d.name} (id ${d.id}, v${d.version}): ${s.layout ?? 'auto'} layout, arrows point ${s.direction === 'RIGHT' ? 'right' : 'down'}; ${plural(d.nodes.length, 'box', 'boxes')}, ${plural(d.edges.length, 'arrow', 'arrows')}`);
+          const inside = new Map();
+          for (const n of d.nodes) {
+            const p = n.parent ?? '';
+            if (!inside.has(p)) inside.set(p, []);
+            inside.get(p).push(n);
+          }
+          const tree = (parent, depth) => {
+            for (const n of inside.get(parent) ?? []) {
+              const kids = inside.get(n.id)?.length;
+              const role = n.role ?? n.description?.split('\n')[0];
+              const size = n.width || n.height ? `${n.width ?? 'auto'}×${n.height ?? 'auto'}` : '';
+              const extra = [n.path, role, n.weight !== undefined ? `weight ${n.weight}` : '', size].filter(Boolean).join(' · ');
+              console.log(`${'  '.repeat(depth + 1)}[${n.layer}] ${n.label} (${n.id})${kids ? ` ▸ ${kids} inside` : ''}${extra ? ` — ${extra}` : ''}`);
+              tree(n.id, depth + 1);
+            }
+          };
+          tree('', 0);
+          if (d.edges.length) console.log('Arrows:');
           const byId = new Map(d.nodes.map((n) => [n.id, n]));
-          for (const n of d.nodes) console.log(`  [${n.layer}] ${n.label} (${n.id})${n.description ? ` — ${n.description}` : ''}`);
-          for (const e of d.edges) console.log(`  ${byId.get(e.source)?.label} → ${byId.get(e.target)?.label}${e.label ? ` (${e.label})` : ''}  [${e.id}]`);
+          for (const e of d.edges) console.log(`  ${byId.get(e.source)?.label} → ${byId.get(e.target)?.label}${arrowText(e)}  [${e.id}]`);
         });
       }
       case 'create': {
         const d = await post('/api/v1/diagrams', { name: need(flags.name ?? rest.join(' '), 'name') });
         return console.log(`Created diagram ${d.id}: ${d.name}`);
       }
+      case 'rename': {
+        const d = await patch(await base(), { name: need(flags.name ?? rest.join(' '), 'new name (--name)') });
+        return console.log(`Renamed diagram ${d.id} to ${d.name}`);
+      }
+      case 'settings': {
+        const settings = {};
+        if (flags.layout !== undefined) {
+          settings.layout = String(flags.layout).toLowerCase();
+          if (!['auto', 'manual'].includes(settings.layout)) fail('--layout is auto or manual');
+        }
+        if (flags.direction !== undefined) {
+          settings.direction = String(flags.direction).toUpperCase();
+          if (!['DOWN', 'RIGHT'].includes(settings.direction)) fail('--direction is down or right');
+        }
+        const d = Object.keys(settings).length ? await patch(await base(), { settings }) : await get(await base());
+        return out(flags, d.settings, (s) => console.log(`${d.name}: ${s.layout} layout, arrows point ${s.direction === 'RIGHT' ? 'right' : 'down'}`));
+      }
       case 'add-node': {
-        const body = { label: need(flags.label ?? rest.join(' '), 'label'), layer: flags.layer, description: flags.desc };
-        const l = await link();
-        if (l !== undefined) body.link = l;
-        const n = await post(`/api/v1/diagrams/${await diagramId()}/nodes`, body);
-        return console.log(`Added node "${n.label}" (${n.id})`);
+        const body = await boxBody();
+        body.label = need(flags.label ?? rest.join(' '), 'label');
+        const n = await post(`${await base()}/nodes`, body);
+        return console.log(`Added box "${n.label}" (${n.id})`);
       }
       case 'update-node': {
-        const body = {};
-        if (flags.label) body.label = flags.label;
-        if (flags.layer) body.layer = flags.layer;
-        if (flags.desc !== undefined) body.description = flags.desc;
-        const l = await link();
-        if (l !== undefined) body.link = l;
-        const n = await patch(`/api/v1/diagrams/${await diagramId()}/nodes/${encodeURIComponent(need(rest.join(' '), 'node label or id'))}`, body);
-        return console.log(`Updated node "${n.label}"`);
+        const body = await boxBody();
+        if (!Object.keys(body).length) {
+          fail('Nothing to change. Flags: --label --layer --parent --path --role --weight --width --height --desc --link-task --link-epoch --link none');
+        }
+        const n = await patch(`${await base()}/nodes/${boxRef()}`, body);
+        return console.log(`Updated box "${n.label}"`);
       }
-      case 'rm-node':
-        await del(`/api/v1/diagrams/${await diagramId()}/nodes/${encodeURIComponent(need(rest.join(' '), 'node label or id'))}`);
-        return console.log('Node removed');
+      case 'rm-node': {
+        const r = await del(`${await base()}/nodes/${boxRef()}${flags['with-children'] ? '?withChildren=true' : ''}`);
+        return console.log(r.removed > 1 ? `Removed ${r.removed} boxes` : 'Box removed');
+      }
       case 'connect': {
         const [source, target] = rest;
-        const e = await post(`/api/v1/diagrams/${await diagramId()}/edges`, {
-          source: need(source, 'source node'), target: need(target, 'target node'), label: flags.label,
-        });
-        return console.log(`Connected (${e.id})`);
+        const body = { source: need(source, 'box the arrow starts at'), target: need(target, 'box the arrow points to') };
+        if (flags.label !== undefined) body.label = flags.label;
+        if (flags.count !== undefined) body.count = num(flags.count, '--count');
+        const e = await post(`${await base()}/edges`, body);
+        // Two boxes have one arrow each way; asking again returns the one there is, unchanged.
+        const same = (flags.label === undefined || e.label === flags.label) && (body.count === undefined || (e.count ?? 1) === Math.round(body.count));
+        if (!same) return console.log(`Those boxes were already joined (${e.id}${arrowText(e)}). Change it with: pm diagram update-edge ${e.id} [--label ..] [--count N]`);
+        return console.log(`Connected (${e.id})${arrowText(e)}`);
       }
-      case 'rm-edge':
-        await del(`/api/v1/diagrams/${await diagramId()}/edges/${need(rest[0], 'edge id')}`);
-        return console.log('Edge removed');
+      case 'update-edge': {
+        const id = await arrowId();
+        const body = {};
+        if (flags.label !== undefined) body.label = flags.label;
+        if (flags.count !== undefined) body.count = flags.count === 'none' ? null : num(flags.count, '--count');
+        if (!Object.keys(body).length) fail('Nothing to change. Flags: --label ".." --count N|none');
+        const e = await patch(`${await base()}/edges/${encodeURIComponent(id)}`, body);
+        return console.log(`Updated arrow ${e.id}${arrowText(e)}`);
+      }
+      case 'rm-edge': {
+        const id = await arrowId();
+        await del(`${await base()}/edges/${encodeURIComponent(id)}`);
+        return console.log('Arrow removed');
+      }
+      case 'import': {
+        const file = need(rest[0], 'JSON file to import (as written by pm diagram export)');
+        let data;
+        try {
+          data = JSON.parse(fs.readFileSync(file, 'utf8'));
+        } catch (err) {
+          fail(`Can't read ${file}: ${err.message}`);
+        }
+        if (!data || !Array.isArray(data.nodes)) fail(`${file} needs a "nodes" list (and usually "edges"), like the JSON pm diagram export writes.`);
+        const body = { mode: flags.replace ? 'replace' : 'merge', nodes: data.nodes, edges: Array.isArray(data.edges) ? data.edges : [] };
+        if (data.settings && typeof data.settings === 'object') body.settings = data.settings;
+        const url = `${await base()}/import`;
+        if (!flags.yes) {
+          const r = await post(url, { ...body, dryRun: true });
+          return out(flags, r, () => {
+            console.log(`Dry run (${body.mode}): this would ${importSummary(r, false)}.`);
+            if (r.nodes.removed || r.edges.removed) console.log("Removed boxes and arrows can't be brought back.");
+            if (importSummary(r, false) !== 'change nothing') console.log('Nothing has changed yet. Run the same command with --yes to apply it.');
+          });
+        }
+        const r = await post(url, body);
+        return out(flags, r, () => console.log(`Imported (${body.mode}): ${importSummary(r, true)}. The diagram is now version ${r.version}.`));
+      }
+      case 'export': {
+        const d = await get(`/api/v1/diagrams/${await resolveDiagram(rest.length ? rest.join(' ') : flags.diagram)}`);
+        // The same JSON as the web app's "Export as JSON"; pm diagram import and the web app read it back.
+        const text = `${JSON.stringify({ name: d.name, settings: d.settings, nodes: d.nodes, edges: d.edges }, null, 2)}\n`;
+        if (!flags.out) return process.stdout.write(text);
+        fs.writeFileSync(flags.out, text);
+        return console.log(`Wrote ${plural(d.nodes.length, 'box', 'boxes')} and ${plural(d.edges.length, 'arrow', 'arrows')} to ${flags.out}`);
+      }
       default:
-        fail('Try: diagram list|show|create|add-node|update-node|rm-node|connect|rm-edge');
+        fail('Try: diagram list|show|create|rename|settings|add-node|update-node|rm-node|connect|update-edge|rm-edge|import|export (pm help shows the flags)');
     }
   },
 
@@ -900,10 +1042,16 @@ Time:     pm time start --task APP-12 | --epoch E  [--note]
           pm time log --task APP-12 --duration 1h30m [--note] [--date 2026-11-11]
           pm time list [--task APP-12 | --epoch E] [--from DATE] [--to DATE]
           pm time edit <entry> [--duration 45m] [--note ..] [--date ..]  |  pm time delete <entry>
-Diagram:  pm diagram list | show [id] | create --name X
-          pm diagram add-node --label "AuthService" [--layer services] [--desc ".."] [--link-task APP-12] [--link-epoch E] [--diagram ID]
-          pm diagram update-node "AuthService" [--label ..] [--desc ..] [--layer ..]  |  pm diagram rm-node "AuthService"
-          pm diagram connect "AuthService" "Database" [--label "reads users"]  |  pm diagram rm-edge <edge id>
+Diagram:  pm diagram list | show [id|name] | create --name X | rename --name X | export [--out file.json]
+          pm diagram add-node --label "AuthService" [--layer services] [--parent "Backend"] [--path src/auth/] [--role "Checks logins"]
+                     [--weight 1200] [--width 200 --height 80] [--desc ".."] [--link-task APP-12 | --link-epoch E]
+          pm diagram update-node "AuthService" [same flags; --label renames it; none clears one: --parent none, --weight none]
+          pm diagram rm-node "AuthService" [--with-children]      (without it, the boxes inside move up a level)
+          pm diagram connect "AuthService" "Database" [--label "reads users"] [--count 12]
+          pm diagram update-edge <id> | "From" "To" [--label ..] [--count N|none]  |  pm diagram rm-edge <id> | "From" "To"
+          pm diagram import file.json [--replace] [--yes]   shows what would change; --yes applies it in one save
+          pm diagram settings [--layout auto|manual] [--direction down|right]
+          Add --diagram <id|name> for a diagram other than the first. Boxes are named by label or id.
 Files:    pm file upload ./path [--folder F] | list [--folder F|root] | download <id> [--out path]
           pm file rename <id> --name X | move <id> --folder F|root | delete <id>
 Docs:     pm doc create --name "Design notes.md" [--folder F] [--file notes.md | --content ".."]

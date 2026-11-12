@@ -3,7 +3,7 @@ import { useQuery, useQueryClient, type QueryClient } from '@tanstack/react-quer
 import { api, CLIENT_ID, V1, getCurrentProject, lastWriteStartedAt } from './api';
 import { STATUS_COLORS } from './util';
 import { useProjectId } from './projectContext';
-import type { Diagram, Epoch, Folder, Meta, Task, TaskDetail, TimeEntry, Tree, User } from './types';
+import type { Diagram, DiagramList, Epoch, Folder, Meta, Task, TaskDetail, TimeEntry, Tree, User } from './types';
 
 export interface TaskFilters {
   q?: string;
@@ -111,11 +111,7 @@ export function useDiagrams() {
   const pid = useProjectId();
   return useQuery({
     queryKey: ['diagrams', pid],
-    queryFn: () =>
-      api.get<{ layers: string[]; diagrams: Array<{ id: number; name: string; version: number; updatedAt: string }> }>(
-        `${V1}/diagrams`,
-        pid,
-      ),
+    queryFn: () => api.get<DiagramList>(`${V1}/diagrams`, pid),
   });
 }
 
@@ -138,18 +134,21 @@ const INVALIDATE: Record<string, string[]> = {
   'elsewhere:time': ['running'],
 };
 
-export function invalidateKinds(qc: QueryClient, kinds: Iterable<string>, onlyStaleSince?: number): void {
+/** Refetches the queries that show these kinds of data. Resolves when the refetches have finished. */
+export function invalidateKinds(qc: QueryClient, kinds: Iterable<string>, onlyStaleSince?: number): Promise<void> {
   const keys = new Set<string>();
   for (const k of kinds) for (const key of INVALIDATE[k] ?? []) keys.add(key);
+  const refetches: Promise<unknown>[] = [];
   for (const key of keys) {
-    void qc.invalidateQueries({
+    refetches.push(qc.invalidateQueries({
       queryKey: [key],
       // Skip queries already refetched (or refetching) after the given time: they include the change.
       ...(onlyStaleSince !== undefined && {
         predicate: (q) => q.state.fetchStatus !== 'fetching' && q.state.dataUpdatedAt < onlyStaleSince,
       }),
-    });
+    }));
   }
+  return Promise.all(refetches).then(() => undefined);
 }
 
 /** Subscribes to server change events so every open device stays in sync. */

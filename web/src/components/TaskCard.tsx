@@ -1,6 +1,6 @@
 import type { Task } from '../types';
 import { CategoryChip, PriorityBadge, TypeBadge } from './Bits';
-import { formatMinutes } from '../util';
+import { contrastText, formatMinutes } from '../util';
 
 interface Props {
   task: Task;
@@ -9,9 +9,12 @@ interface Props {
   onStep?: (task: Task, dir: -1 | 1) => void;
   onMove?: (task: Task) => void;
   className?: string;
+  /** Leave out the epoch label, e.g. on a board that only shows one epoch. */
+  hideEpoch?: boolean;
 }
 
-export function TaskCard({ task, onOpen, onStep, onMove, className = '' }: Props) {
+export function TaskCard({ task, onOpen, onStep, onMove, className = '', hideEpoch = false }: Props) {
+  const epochColor = task.epochColor ?? '#6366f1';
   return (
     <div
       className={`card task-card ${className}`}
@@ -22,18 +25,19 @@ export function TaskCard({ task, onOpen, onStep, onMove, className = '' }: Props
       tabIndex={0}
       onKeyDown={(e) => e.key === 'Enter' && onOpen(task.id)}
     >
+      {task.epochName && !hideEpoch && (
+        // The epoch's name, filled with its colour (the same colour as the card's left edge).
+        <span className="epoch-chip" style={{ background: epochColor, color: contrastText(epochColor) }}>
+          ◆ {task.epochName}
+        </span>
+      )}
       <div className="row nowrap" style={{ justifyContent: 'space-between' }}>
         <span className="key">{task.key}</span>
         <TypeBadge type={task.type} />
       </div>
       <div className="title">{task.title}</div>
-      {(task.categories.length > 0 || task.epochName) && (
+      {task.categories.length > 0 && (
         <div className="row" style={{ gap: 4 }}>
-          {task.epochName && (
-            <span className="chip" style={{ background: (task.epochColor ?? '#6366f1') + '22', color: task.epochColor ?? '#6366f1' }}>
-              ◆ {task.epochName}
-            </span>
-          )}
           {task.categories.map((c) => (
             <CategoryChip key={c.id} category={c} />
           ))}

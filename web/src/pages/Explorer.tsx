@@ -12,18 +12,19 @@ import {
   type DragEndEvent,
 } from '@dnd-kit/core';
 import { api, V1 } from '../api';
-import { useColors, useTree } from '../hooks';
+import { useColors, useEpochs, useTree } from '../hooks';
 import { useMutate } from '../mutate';
 import type { FileItem, Tree } from '../types';
-import { cx, errorMessage, formatBytes } from '../util';
+import { cx, errorMessage, formatBytes, joinAnd, plural } from '../util';
 import { Markdown, Spinner } from '../components/Bits';
 import { MarkdownEditor } from '../components/MarkdownEditor';
 import { folderPath } from '../components/Filters';
 import { PageHeader, useTaskParam } from '../components/Layout';
 import { QuickAdd } from '../components/QuickAdd';
-import { Sheet, confirmAction } from '../components/Sheet';
+import { askConfirm, type ConfirmOptions } from '../components/Confirm';
+import { Sheet } from '../components/Sheet';
 import { useToast } from '../components/Toast';
-import { EpochForm } from './Epochs';
+import { EpochForm, epochDeleteQuestion } from './Epochs';
 
 type Kind = 'folder' | 'epoch' | 'task' | 'file';
 interface Item {
@@ -337,23 +338,65 @@ function ItemMenu({ item, tree, onClose, onMove, onNewFolder, onNewTask, onNewEp
   onNewEpoch: (folder: number | null) => void; onUpload: (folder: number | null) => void; onNewDoc: (folder: number | null) => void; onOpen: (i: Item) => void;
 }) {
   const mutate = useMutate();
+  const epochs = useEpochs().data ?? [];
   const folderId = item === 'root' ? null : item.kind === 'folder' ? item.id : undefined;
   const act = (fn: () => void) => () => { onClose(); fn(); };
 
+  const urlOf = (i: Item) => (i.kind === 'folder' ? `folders/${i.id}` : i.kind === 'epoch' ? `epochs/${i.id}` : i.kind === 'file' ? `files/${i.id}` : `tasks/${i.id}`);
   const rename = async (i: Item) => {
     const name = window.prompt('New name', i.name);
     if (!name?.trim() || name === i.name) return;
-    // The confirm text below warns that direct epoch time is removed, so deleteTime=true is safe to send.
-    const url = i.kind === 'folder' ? `folders/${i.id}` : i.kind === 'epoch' ? `epochs/${i.id}?deleteTime=true` : i.kind === 'file' ? `files/${i.id}` : `tasks/${i.id}`;
-    await mutate(() => api.patch(`${V1}/${url}`, i.kind === 'task' ? { title: name.trim() } : { name: name.trim() }), ['folders', 'epochs', 'tasks', 'files']);
+    await mutate(() => api.patch(`${V1}/${urlOf(i)}`, i.kind === 'task' ? { title: name.trim() } : { name: name.trim() }), ['folders', 'epochs', 'tasks', 'files']);
+  };
+  /** Where a folder's or epoch's contents go when it is deleted. */
+  const parentName = (folderId: number | null) => {
+    const f = folderId === null ? undefined : tree.folders.find((x) => x.id === folderId);
+    return f ? `"${f.name}"` : 'the top level';
   };
   const remove = async (i: Item) => {
-    const msg =
-      i.kind === 'folder' ? `Delete folder "${i.name}"? Its contents move up to the parent folder.`
-      : i.kind === 'epoch' ? `Delete epoch "${i.name}"? Its tasks are kept; time logged directly on the epoch is removed.`
-      : `Delete ${i.kind} "${i.name}"? This cannot be undone.`;
-    if (!confirmAction(msg)) return;
-    const url = i.kind === 'folder' ? `folders/${i.id}` : i.kind === 'epoch' ? `epochs/${i.id}` : i.kind === 'file' ? `files/${i.id}` : `tasks/${i.id}`;
+    let question: ConfirmOptions;
+    let url = urlOf(i);
+    if (i.kind === 'folder') {
+      const parentId = tree.folders.find((f) => f.id === i.id)?.parentId ?? null;
+      const others = [
+        plural(tree.folders.filter((f) => f.parentId === i.id).length, 'folder'),
+        plural(tree.epochs.filter((e) => e.folderId === i.id).length, 'epoch'),
+        plural(tree.files.filter((f) => f.folderId === i.id).length, 'file'),
+      ].filter((s) => !s.startsWith('0 '));
+      const taskCount = tree.tasks.filter((t) => t.folderId === i.id && t.epochId === null).length;
+      const tasks = taskCount ? [plural(taskCount, 'task')] : [];
+      // "its 1 epoch moves", "its 2 epochs move", "its folder and epoch move".
+      const its = (items: string[], one: string, many: string) => `its ${joinAnd(items)} ${items.length === 1 && items[0].startsWith('1 ') ? one : many}`;
+      // Everything moves up to the parent folder. At the top level, tasks become unfiled (the Inbox).
+      const moves: string[] = [];
+      if (parentId !== null) {
+        const all = [...others, ...tasks];
+        if (all.length) moves.push(`${its(all, 'moves', 'move')} up to ${parentName(parentId)}`);
+      } else {
+        if (others.length) moves.push(`${its(others, 'moves', 'move')} up to the top level`);
+        if (tasks.length) moves.push(`${its(tasks, 'goes', 'go')} to the Inbox (unfiled tasks)`);
+      }
+      question = {
+        title: 'Delete folder?',
+        body: `"${i.name}" will be deleted. ` + (moves.length ? `Nothing inside it is deleted: ${moves.join(', and ')}.` : 'It is empty.'),
+        confirmLabel: 'Delete folder',
+      };
+    } else if (i.kind === 'epoch') {
+      // The epochs list knows how much time was logged directly on the epoch; the tree's copy doesn't.
+      const e = epochs.find((x) => x.id === i.id) ?? tree.epochs.find((x) => x.id === i.id);
+      question = epochDeleteQuestion(e ?? { name: i.name, total: 0, folderId: null }, tree.folders);
+      url += '?deleteTime=true'; // the question says so; without it the server refuses when such time exists
+    } else if (i.kind === 'task') {
+      const t = tree.tasks.find((x) => x.id === i.id);
+      question = {
+        title: `Delete ${t?.key ?? 'task'}?`,
+        body: `"${i.name}" will be deleted, along with its checklist, comments, links and logged time. This can't be undone.`,
+        confirmLabel: 'Delete task',
+      };
+    } else {
+      question = { title: 'Delete file?', body: `"${i.name}" will be deleted. This can't be undone.`, confirmLabel: 'Delete file' };
+    }
+    if (!(await askConfirm(question))) return;
     await mutate(() => api.del(`${V1}/${url}`), ['folders', 'epochs', 'tasks', 'files']);
   };
 

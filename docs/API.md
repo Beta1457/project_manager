@@ -106,14 +106,22 @@ Durations accept minutes (`90`) or units: `45m`, `45 min`, `1.5h`, `1h30m`, `2h 
 
 ## Architecture diagrams
 
-Each project starts with one diagram, "Code Architecture".
+Each project starts with one diagram, "Code Architecture". The web app lays diagrams out automatically (ELK) unless a diagram is switched to the manual layout, where boxes keep the positions people give them.
 
-- `GET /api/v1/diagrams` → `{layers[], diagrams[]}` · `POST {name}` · `GET /:id` · `DELETE /:id`
-- `PUT /api/v1/diagrams/:id {version, name?, nodes[], edges[]}` — full replace; 409 if `version` is stale
-- Node/edge operations (node refs may be the id or the label):
-  - `POST /:id/nodes {label*, layer?, description?, x?, y?, link?: {kind: "task"|"epoch"|"folder"|"file", id}}` (auto-positioned if x/y omitted; a `link` to something outside the diagram's project is dropped)
-  - `PATCH /:id/nodes/:node` · `DELETE /:id/nodes/:node` (also removes its edges)
-  - `POST /:id/edges {source*, target*, label?}` · `DELETE /:id/edges/:edgeId`
+- **Box (node):** `id` (1-128 characters; made for you if left out), `label*` (unique inside its group), `layer` (colour; `layers[]` lists the usual ones), `description`, `role` (one line on what it does, ≤200), `path` (file or folder, ≤300), `weight` (0-1e9: bigger boxes for busier code, e.g. lines of code), `width` 40-4000 and `height` 24-4000 (fixed size in px; otherwise it fits the text), `parent` (the box it sits in; up to 6 levels, no loops), `x`/`y` (relative to the parent; only the manual layout uses them), `link {kind: "task"|"epoch"|"folder"|"file", id}` (dropped if it points outside the diagram's project).
+- **Arrow (edge):** `id`, `source*`, `target*`, `label` (≤200), `count` (1-1e6: how many references it stands for; shown as "×N"). One arrow per direction between two boxes; an arrow between a box and a group it is inside is a 400.
+- **Settings:** `{layout: "auto"|"manual", direction: "DOWN"|"RIGHT"}`.
+- Wherever a request names a box (`:node`, `parent`, `source`, `target`), it may give the id or the label; a label several boxes share is a 409 (use the id). Limits: 2000 boxes, 5000 arrows (`limits` in the list).
+
+Endpoints:
+
+- `GET /api/v1/diagrams` → `{layers[], limits {nodes, edges, depth}, diagrams[{id, name, version, updatedAt, nodeCount, edgeCount}]}` · `POST {name}` · `GET /:id` → `{id, name, version, nodes[], edges[], settings, …}` · `DELETE /:id`
+- `PATCH /api/v1/diagrams/:id {name?, settings?}` — rename, or change the layout or direction
+- `PUT /api/v1/diagrams/:id {version, schema: 2, name?, nodes[], edges[], settings?}` — full replace (the web editor's save); 409 if `version` is stale. Without `schema: 2` the body is taken to come from an older page: box fields and settings it leaves out are kept from the stored diagram.
+- `POST /api/v1/diagrams/:id/import {mode?: "merge"|"replace", nodes[], edges?, settings?, version?, dryRun?}` — many changes in one save (one version, one event) → `{mode, dryRun, version, nodes: {added, updated, removed}, edges: {…}, settingsChanged}`. Each box is matched to a stored one by id, then by label in a parent with the same label, then by label anywhere; a matched box keeps the fields the import leaves out (position, size, link…) and takes the import's id if it gives one. Unmatched boxes are added. `merge` (the default) keeps everything the import doesn't list; `replace` removes it. An arrow listed more than once becomes one arrow whose count is the total. `updated` counts only boxes and arrows that actually change, and `settingsChanged` says whether `settings` changes the layout or direction, so importing a diagram's own export reports nothing. `dryRun: true` reports without saving. Same JSON as `GET /:id` (or the web app's export) works as input.
+- `POST /:id/nodes {label*, …box fields}` (placed automatically if x/y are left out) · `PATCH /:id/nodes/:node {…box fields}` (fields left out keep their values; `null` clears one; moving it to another group places it again unless x/y are given)
+- `DELETE /:id/nodes/:node[?withChildren=true]` → `{ok, removed}` — also removes its arrows. The boxes inside it move up a level (409 if a label would clash there), or with `withChildren=true` are removed too, at every depth.
+- `POST /:id/edges {source*, target*, label?, count?}` (if the two boxes are already joined that way, returns that arrow unchanged) · `PATCH /:id/edges/:edge {label?, count?}` (`count: null` resets it to 1) · `DELETE /:id/edges/:edge`
 
 ## Accounts, tokens and backups
 
@@ -130,3 +138,5 @@ The first account created on a server is an admin. Admins manage accounts and se
 ## Live updates
 
 `GET /api/events` — Server-Sent Events stream; each message is `{"kind": "tasks"|"epochs"|"folders"|"files"|"categories"|"types"|"diagrams"|"time"|"projects", "id"?, "actor"?, "origin"?, "projectId"?}`. A stream only receives changes in the caller's own projects (and to their own project list). `origin` echoes the optional `x-pm-client-id` request header of the browser tab that made the change.
+
+<!-- Part of Project Manager. Copyright (c) 2026 Bettafish Games, LLC. MIT License. -->

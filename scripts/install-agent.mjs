@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+// Part of Project Manager. Copyright (c) 2026 Bettafish Games, LLC.
+// SPDX-License-Identifier: MIT (the full text is in Project Manager's LICENSE file). Keep this notice in copies.
+//
 // Connects one of your code projects to the Project Manager for your coding agent: Claude Code, or any agent
 // that reads AGENTS.md (OpenAI Codex, Cursor, GitHub Copilot and others). Runs on the server or on any other
 // computer (Windows, macOS or Linux) and needs only Node.js 18+.

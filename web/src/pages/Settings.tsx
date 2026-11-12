@@ -4,14 +4,14 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, V1 } from '../api';
 import { useMe, useMeta } from '../hooks';
 import { useMutate } from '../mutate';
-import { copyText, formatBytes, timeAgo } from '../util';
+import { copyText, formatBytes, plural, timeAgo } from '../util';
 import type { Project } from '../types';
 import { NewProjectForm, PROJECT_KEY_RE } from '../project';
 import { useProject } from '../projectContext';
 import { useToast } from '../components/Toast';
 import { PageHeader } from '../components/Layout';
-import { confirmAction } from '../components/Sheet';
-import { ColorInput, StatusPill, TypeBadge } from '../components/Bits';
+import { askConfirm } from '../components/Confirm';
+import { ColorInput, Credit, StatusPill, TypeBadge } from '../components/Bits';
 
 interface Token { id: number; name: string; prefix: string; createdAt: string; lastUsedAt: string | null; owner: string }
 interface UserRow { id: number; username: string; isAdmin: boolean; projectCount: number; createdAt: string }
@@ -32,6 +32,7 @@ export function SettingsPage() {
           <Tokens />
           {isAdmin && <Users />}
           {isAdmin && <BackupsCard />}
+          <Credit />
         </div>
       </div>
     </>
@@ -89,20 +90,27 @@ function ProjectRow({ project: p, current, onOpen }: { project: Project; current
       toast('A key is 1–10 letters or digits and starts with a letter', 'error');
       return setKey(p.key);
     }
-    const ok = confirmAction(
-      `Change the key from ${p.key} to ${next}?\n\nEvery task is renamed (${p.key}-12 becomes ${next}-12). ` +
+    const ok = await askConfirm({
+      title: `Change the key from ${p.key} to ${next}?`,
+      body:
+        `Every task is renamed (${p.key}-12 becomes ${next}-12). ` +
         `Notes, commits and messages elsewhere that mention ${p.key}-… keep the old key.`,
-    );
+      confirmLabel: 'Change key',
+      danger: false,
+    });
     if (!ok || !(await patch({ key: next }))) setKey(p.key);
   };
 
   const remove = async () => {
-    const typed = window.prompt(
-      `Delete "${p.name}" and everything in it: ${p.taskCount} task(s), epochs, folders, files, the diagram and time entries? ` +
-        `This cannot be undone (backups still have it).\n\nType ${p.key} to confirm.`,
-    );
-    if (typed === null) return;
-    if (typed.trim().toUpperCase() !== p.key) return toast('That wasn’t the project key, so nothing was deleted', 'error');
+    const ok = await askConfirm({
+      title: `Delete ${p.name}?`,
+      body:
+        `Everything in it will be deleted: ${plural(p.taskCount, 'task')}, epochs, folders, files, diagrams and time entries. ` +
+        'This can’t be undone (a backup made before now would still have it).',
+      confirmLabel: 'Delete project',
+      typeToConfirm: p.key,
+    });
+    if (!ok) return;
     await mutate(() => api.del(`${V1}/projects/${p.id}?confirm=${encodeURIComponent(p.key)}`), ['projects'], `Deleted ${p.name}`);
   };
 
@@ -116,7 +124,7 @@ function ProjectRow({ project: p, current, onOpen }: { project: Project; current
         onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== p.name) void patch({ name: v }); }} />
       <div className="row nowrap">
         {current ? <span className="current">Current</span> : <button className="btn btn-sm" onClick={onOpen}>Open</button>}
-        <button className="btn btn-ghost btn-danger btn-sm" aria-label={`Delete ${p.name}`} onClick={remove}>✕</button>
+        <button className="btn btn-ghost btn-danger btn-sm" aria-label={`Delete project ${p.name}`} onClick={remove}>✕</button>
       </div>
       <div className="tiny muted" style={{ gridColumn: '2 / -1' }}>{p.openTaskCount} open · {p.taskCount} total</div>
     </div>
@@ -163,7 +171,10 @@ function Categories() {
         <div key={c.id} className="row nowrap">
           <ColorInput value={c.color} label={`${c.name} color`} onCommit={(color) => mutate(() => api.patch(`${V1}/categories/${c.id}`, { color }), ['categories'])} />
           <input defaultValue={c.name} onBlur={(e) => e.target.value.trim() && e.target.value !== c.name && mutate(() => api.patch(`${V1}/categories/${c.id}`, { name: e.target.value.trim() }), ['categories'])} />
-          <button className="btn btn-ghost btn-danger" aria-label={`Delete ${c.name}`} onClick={() => confirmAction(`Delete category "${c.name}"? It will be removed from all tasks.`) && mutate(() => api.del(`${V1}/categories/${c.id}`), ['categories'])}>✕</button>
+          <button className="btn btn-ghost btn-danger" aria-label={`Delete category ${c.name}`} onClick={async () => {
+            const ok = await askConfirm({ title: 'Delete category?', body: `"${c.name}" will be removed from every task that has it. This can’t be undone.`, confirmLabel: 'Delete category' });
+            if (ok) await mutate(() => api.del(`${V1}/categories/${c.id}`), ['categories']);
+          }}>✕</button>
         </div>
       ))}
       <form className="row nowrap" onSubmit={async (e) => {
@@ -192,8 +203,11 @@ function Types() {
           <ColorInput value={meta.typeColors[t] ?? '#64748b'} label={`${t} color`} onCommit={(color) => mutate(() => api.patch(`${V1}/types/${encodeURIComponent(t)}`, { color }), ['types', 'tasks'])} />
           <TypeBadge type={t} />
           <span className="grow" />
-          <button className="btn btn-ghost btn-danger" aria-label={`Delete ${t}`}
-            onClick={() => confirmAction(`Delete type "${t}"?`) && mutate(() => api.del(`${V1}/types/${encodeURIComponent(t)}`), ['types'])}>✕</button>
+          <button className="btn btn-ghost btn-danger" aria-label={`Delete type ${t}`}
+            onClick={async () => {
+              const ok = await askConfirm({ title: 'Delete task type?', body: `"${t}" will be removed from the list of types. A type that tasks still use can’t be deleted.`, confirmLabel: 'Delete type' });
+              if (ok) await mutate(() => api.del(`${V1}/types/${encodeURIComponent(t)}`), ['types']);
+            }}>✕</button>
         </div>
       ))}
       <form className="row nowrap" onSubmit={async (e) => {
@@ -263,7 +277,12 @@ function Tokens() {
           <span className="key">{t.prefix}…</span>
           <span className="grow muted">created {timeAgo(t.createdAt)} · {t.lastUsedAt ? `used ${timeAgo(t.lastUsedAt)}` : 'never used'}</span>
           <button className="btn btn-sm btn-danger" onClick={async () => {
-            if (!confirmAction(`Revoke token "${t.name}"? Anything using it will stop working.`)) return;
+            const ok = await askConfirm({
+              title: 'Revoke token?',
+              body: `Anything using "${t.name}", such as a coding agent’s pm tool, will stop working until it gets a new token.`,
+              confirmLabel: 'Revoke token',
+            });
+            if (!ok) return;
             await mutate(() => api.del(`${V1}/tokens/${t.id}`), []);
             void refresh();
           }}>Revoke</button>
@@ -291,10 +310,15 @@ function Users() {
   const [admin, setAdmin] = useState(false);
   const refresh = () => qc.invalidateQueries({ queryKey: ['users'] });
   const remove = async (u: UserRow) => {
-    const what = u.projectCount
-      ? `Delete user "${u.username}" and their ${u.projectCount} project(s) with everything in them? This cannot be undone.`
-      : `Delete user "${u.username}"?`;
-    if (!confirmAction(what)) return;
+    const ok = await askConfirm({
+      title: `Delete user ${u.username}?`,
+      body: u.projectCount
+        ? `Their ${plural(u.projectCount, 'project')} and everything in them will be deleted too. This can’t be undone.`
+        : 'They will no longer be able to sign in. This can’t be undone.',
+      confirmLabel: 'Delete user',
+      typeToConfirm: u.projectCount ? u.username : undefined,
+    });
+    if (!ok) return;
     await mutate(() => api.del(`${V1}/users/${u.id}${u.projectCount ? '?deleteProjects=true' : ''}`), []);
     void refresh();
   };
@@ -310,7 +334,7 @@ function Users() {
             <b>{u.username}</b>{u.isAdmin && <span className="small muted"> (admin)</span>}{' '}
             <span className="small muted">· {u.projectCount} project{u.projectCount === 1 ? '' : 's'} · since {new Date(u.createdAt).toLocaleDateString()}</span>
           </span>
-          {u.id !== me?.user.id && <button className="btn btn-sm btn-danger" onClick={() => void remove(u)}>Delete</button>}
+          {u.id !== me?.user.id && <button className="btn btn-sm btn-danger" aria-label={`Delete user ${u.username}`} onClick={() => void remove(u)}>Delete</button>}
         </div>
       ))}
       <form className="row" onSubmit={async (e) => {
@@ -332,12 +356,18 @@ function BackupsCard() {
   const { data } = useQuery({ queryKey: ['backups'], queryFn: () => api.get<Backups>(`${V1}/backups`) });
   const qc = useQueryClient();
   const mutate = useMutate();
+  const hours = data?.intervalHours ?? 4;
   return (
     <section className="card panel stack">
       <h2>Backups</h2>
       <p className="small muted" style={{ margin: 0 }}>
-        Every change is saved to the database immediately. A full backup snapshot is taken every {data?.intervalHours ?? 4} hours
-        (skipped if nothing changed); the newest {data?.keep ?? 42} are kept in <code>{data?.directory}</code>.
+        Every change is saved to the database immediately.{' '}
+        {hours > 0 ? (
+          <>A full backup snapshot is taken every {plural(hours, 'hour')} (skipped if nothing changed); </>
+        ) : (
+          <>Automatic snapshots are turned off (<code>PM_BACKUP_HOURS</code> is 0), so only Back up now makes one; </>
+        )}
+        the newest {data?.keep ?? 42} are kept in <code>{data?.directory}</code>.
       </p>
       <div>
         <button className="btn" onClick={async () => {

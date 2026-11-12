@@ -3,6 +3,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import { errorMessage } from '../util';
+import { Credit } from '../components/Bits';
 
 /** Where to go after signing in: the page that sent us to /login (e.g. a "/?task=12" link), else the board. */
 export function returnPath(state: unknown): string {
@@ -65,6 +66,7 @@ export function LoginPage() {
         )}
         {error && <div className="error-text">{error}</div>}
         <button className="btn btn-primary" type="submit" disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</button>
+        <Credit />
       </form>
     </div>
   );

@@ -1,4 +1,5 @@
-import { useEffect, useId, useRef, type ReactNode } from 'react';
+import { useEffect, useId, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { readWidth, storeWidth, useResizeHandle } from '../resize';
 
 interface Props {
   title: ReactNode;
@@ -7,13 +8,20 @@ interface Props {
   actions?: ReactNode;
   /** "side" = full screen on phones, right panel on desktop. "center" = bottom sheet / dialog. */
   variant?: 'side' | 'center';
-  /** Asked before closing; return false to keep the sheet open (e.g. "Discard your unsaved task?"). */
-  confirmClose?: () => boolean;
+  /**
+   * Asked before closing: return false, or a promise of false, to keep the sheet open
+   * (e.g. `() => !dirty || askConfirm({ title: 'Discard this new task?', … })`).
+   */
+  confirmClose?: () => boolean | Promise<boolean>;
 }
 
 /** Open sheets, innermost last: only the topmost one reacts to Escape / Tab. */
 const openSheets: number[] = [];
 let nextSheetId = 1;
+
+/** The side panel's width on desktop, which people can drag (styles.css keeps it 80 px clear of the left edge). */
+const PANEL_WIDTH = { min: 420, max: 1200, initial: 640 };
+const PANEL_WIDTH_KEY = 'pm.sheet.width';
 
 const FOCUSABLE =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -42,12 +50,22 @@ export function Sheet({ title, onClose, children, actions, variant = 'side', con
   const ref = useRef<HTMLDivElement>(null);
   // Latest props without re-running the mount effect (which would steal focus on every render).
   const requestClose = useRef(() => {});
+  const [width, setWidth] = useState(() => readWidth(PANEL_WIDTH_KEY, PANEL_WIDTH.min, PANEL_WIDTH.max) ?? PANEL_WIDTH.initial);
+  const resizer = useResizeHandle({
+    ...PANEL_WIDTH,
+    width,
+    max: Math.min(PANEL_WIDTH.max, window.innerWidth - 80),
+    edge: -1,
+    onChange: setWidth,
+    onCommit: (px) => storeWidth(PANEL_WIDTH_KEY, px === PANEL_WIDTH.initial ? undefined : px),
+  });
   requestClose.current = () => {
     // Commit fields that save on blur (title, estimate, diagram labels) before they unmount.
     const active = document.activeElement as HTMLElement | null;
     if (active && ref.current?.contains(active)) active.blur();
-    if (confirmClose && !confirmClose()) return;
-    onClose();
+    const answer = confirmClose ? confirmClose() : true;
+    if (answer === true) onClose();
+    else if (answer !== false) void answer.then((ok) => ok && onClose());
   };
 
   useEffect(() => {
@@ -81,7 +99,15 @@ export function Sheet({ title, onClose, children, actions, variant = 'side', con
       className={`overlay ${variant === 'center' ? 'modal-center' : ''}`}
       onMouseDown={(e) => e.target === e.currentTarget && requestClose.current()}
     >
-      <div className="sheet" role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} ref={ref}>
+      <div
+        className="sheet"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        ref={ref}
+        style={variant === 'side' ? ({ '--sheet-w': `${width}px` } as CSSProperties) : undefined}
+      >
         <div className="sheet-head">
           <button className="btn btn-ghost btn-icon" onClick={() => requestClose.current()} aria-label="Close">
             ✕
@@ -92,12 +118,9 @@ export function Sheet({ title, onClose, children, actions, variant = 'side', con
           {actions}
         </div>
         <div className="sheet-body">{children}</div>
+        {/* Last, so Tab reaches it after everything in the panel. Desktop only (styles.css). */}
+        {variant === 'side' && <div className="sheet-resizer" aria-label="Resize the panel" {...resizer} />}
       </div>
     </div>
   );
-}
-
-/** Small promise-free confirm wrapper so intent is explicit at call sites. */
-export function confirmAction(message: string): boolean {
-  return window.confirm(message);
 }

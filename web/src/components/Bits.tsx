@@ -165,3 +165,8 @@ export function ProgressBar({ counts, total }: { counts: Record<string, number>;
 export function Spinner() {
   return <div className="empty">Loading…</div>;
 }
+
+/** Who made the app, shown at the bottom of the login and Settings pages. */
+export function Credit() {
+  return <p className="tiny muted credit">Project Manager · © 2026 Bettafish Games, LLC · MIT License</p>;
+}

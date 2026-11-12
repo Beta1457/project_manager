@@ -80,6 +80,8 @@ label.field > * { font-weight: 400; color: var(--text); font-size: 1rem; }
 .btn-primary { background: var(--primary); border-color: var(--primary); color: #fff; }
 .btn-primary:hover { background: var(--primary); filter: brightness(1.08); }
 .btn-danger { color: var(--danger); }
+.btn-danger-solid { background: var(--danger); border-color: var(--danger); color: #fff; }
+.btn-danger-solid:hover:not(:disabled) { background: var(--danger); filter: brightness(1.08); }
 .btn-ghost { border-color: transparent; background: transparent; }
 .btn-sm { min-height: 32px; padding: 0 10px; font-size: 0.875rem; }
 .btn-icon { min-width: 40px; padding: 0; }
@@ -164,13 +166,19 @@ label.field > * { font-weight: 400; color: var(--text); font-size: 1rem; }
 .progress > span { display: block; height: 100%; }
 
 .toasts { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 100; display: grid; gap: 8px; width: min(92vw, 420px); }
-.toast { padding: 10px 14px; border-radius: 8px; background: #1e293b; color: #fff; box-shadow: var(--shadow-lg); cursor: pointer; }
+.toast { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-radius: 8px; background: #1e293b; color: #fff; box-shadow: var(--shadow-lg); cursor: pointer; }
 .toast-error { background: var(--danger); }
+.toast-action {
+  flex: none; min-height: 32px; padding: 4px 12px; border-radius: 6px; cursor: pointer;
+  background: transparent; color: #fff; border: 1px solid rgb(255 255 255 / 0.55); font: inherit; font-weight: 700;
+}
+.toast-action:hover { background: rgb(255 255 255 / 0.12); }
 
 /* ---------- Sheet / modal ---------- */
 .overlay { position: fixed; inset: 0; z-index: 50; background: rgb(15 23 42 / 0.45); display: flex; justify-content: flex-end; }
 .sheet:focus { outline: none; } /* focused programmatically on open, for screen readers */
 .sheet {
+  position: relative; /* for the resize handle on its left edge */
   background: var(--surface); width: 100%; height: 100%;
   display: flex; flex-direction: column; box-shadow: var(--shadow-lg);
 }
@@ -179,10 +187,35 @@ label.field > * { font-weight: 400; color: var(--text); font-size: 1rem; }
 .modal-center { align-items: flex-end; justify-content: center; }
 .modal-center .sheet { height: auto; max-height: 90%; border-radius: 14px 14px 0 0; }
 @media (min-width: 900px) {
-  .sheet { width: 640px; }
+  .sheet { width: clamp(420px, var(--sheet-w, 640px), calc(100vw - 80px)); } /* --sheet-w: dragged by the handle */
   .modal-center { align-items: center; }
   .modal-center .sheet { width: 480px; border-radius: 14px; }
 }
+
+/* ---------- Resize handles (resize.ts): the side panel's left edge, the gap right of each board column ---------- */
+.sheet-resizer, .column-resizer { display: none; }
+@media (min-width: 900px) {
+  .sheet-resizer, .column-resizer { display: block; position: absolute; top: 0; bottom: 0; width: 12px; cursor: col-resize; touch-action: none; z-index: 1; }
+  .sheet-resizer { left: -6px; }
+  .column-resizer { right: -13px; } /* fills the 12px gap between columns */
+  .sheet-resizer::after, .column-resizer::after {
+    content: ''; position: absolute; top: 0; bottom: 0; left: 5px; width: 2px; border-radius: 1px;
+    background: var(--primary); opacity: 0; transition: opacity 0.15s;
+  }
+  .column-resizer::after { top: 6px; bottom: 6px; }
+  .sheet-resizer:hover::after, .column-resizer:hover::after,
+  .sheet-resizer:focus-visible::after, .column-resizer:focus-visible::after,
+  html.resizing .sheet-resizer:focus::after, html.resizing .column-resizer:focus::after { opacity: 1; }
+  .sheet-resizer:focus-visible, .column-resizer:focus-visible { outline: none; } /* the line shows focus instead */
+}
+/* While a handle is dragged the pointer may leave it: keep the resize cursor, and select no text on the way. */
+html.resizing, html.resizing * { cursor: col-resize !important; user-select: none !important; }
+
+/* ---------- Confirm dialog (components/Confirm.tsx) ---------- */
+.confirm-layer > .overlay { z-index: 60; } /* above sheets that are already open */
+.confirm-body { white-space: pre-line; line-height: 1.5; }
+.confirm-word { font-family: ui-monospace, Consolas, monospace; color: var(--text); }
+.confirm-actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; padding-top: 4px; }
 
 /* ---------- Filters ---------- */
 .filterbar { display: flex; gap: 8px; align-items: center; padding: 10px 12px; background: var(--surface); border-bottom: 1px solid var(--border); flex: none; }
@@ -209,6 +242,7 @@ label.field > * { font-weight: 400; color: var(--text); font-size: 1rem; }
 
 .board { flex: 1; overflow: auto; padding: 12px; display: flex; gap: 12px; align-items: flex-start; }
 .column {
+  position: relative; /* for the resize handle in the gap to its right */
   flex: none; width: 100%; display: flex; flex-direction: column; max-height: 100%;
   background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius);
 }
@@ -218,7 +252,7 @@ label.field > * { font-weight: 400; color: var(--text); font-size: 1rem; }
 .column .add-inline { margin: 0 8px 8px; }
 @media (min-width: 900px) {
   .col-tabs { display: none; }
-  .column { width: 290px; }
+  .column { width: var(--col-w, 290px); } /* --col-w: dragged by the handle */
   .board { padding: 16px 20px; }
 }
 
@@ -227,6 +261,11 @@ label.field > * { font-weight: 400; color: var(--text); font-size: 1rem; }
 .task-card.dragging { opacity: 0.35; }
 .task-card.drop-before { box-shadow: 0 -3px 0 var(--primary); }
 .task-card .title { font-weight: 600; line-height: 1.3; word-break: break-word; }
+/* The epoch's name in its colour, top left; long names are cut short (the card's tooltip has it in full). */
+.task-card .epoch-chip {
+  justify-self: start; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  padding: 1px 8px; border-radius: 4px; font-size: 0.72rem; font-weight: 700; line-height: 1.5;
+}
 .task-card .meta { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; font-size: 0.75rem; color: var(--muted); }
 .task-card .actions { display: flex; gap: 6px; }
 .drag-overlay { transform: rotate(2deg); box-shadow: var(--shadow-lg); cursor: grabbing; }
@@ -310,23 +349,130 @@ label.field > * { font-weight: 400; color: var(--text); font-size: 1rem; }
 .epoch-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
 .epoch-card { padding: 14px; display: grid; gap: 10px; border-top: 5px solid; cursor: pointer; color: inherit; }
 
-/* ---------- Diagram ---------- */
-.diagram-wrap { flex: 1; min-height: 0; position: relative; }
-.diagram-node {
-  padding: 8px 12px; border-radius: 8px; border: 2px solid; background: var(--surface); min-width: 120px; max-width: 240px;
-  box-shadow: var(--shadow); font-size: 0.85rem; text-align: center;
+/* ---------- Diagram (pages/Diagram.tsx, diagram/*) ---------- */
+/* Box text sizes must match diagram/sizes.ts, which measures text to size the boxes before they are drawn. */
+.diagram-bar { flex: none; display: grid; gap: 6px; padding: 6px 12px; background: var(--surface); border-bottom: 1px solid var(--border); }
+.diagram-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; min-width: 0; }
+.diagram-legend { gap: 6px; font-size: 0.75rem; }
+.seg { display: inline-flex; flex: none; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.seg button { border: 0; background: var(--surface); color: var(--text); min-height: 32px; padding: 0 10px; font: inherit; font-size: 0.875rem; cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--border); }
+.seg button[aria-pressed='true'] { background: var(--primary-soft); color: var(--primary); font-weight: 600; }
+.seg button:disabled { opacity: 0.5; cursor: default; }
+.toggle-chip.small-chip { min-height: 32px; padding: 4px 10px; }
+.layer-chip {
+  display: inline-flex; align-items: center; gap: 5px; min-height: 28px; padding: 3px 9px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--surface); color: var(--text); font: inherit; cursor: pointer;
 }
-.diagram-node .layer { font-size: 0.65rem; text-transform: uppercase; font-weight: 700; letter-spacing: 0.04em; }
-.diagram-node .label { font-weight: 700; word-break: break-word; }
-.diagram-node .desc { font-size: 0.72rem; color: var(--muted); margin-top: 2px; }
-.diagram-node.selected { outline: 3px solid var(--primary); }
-.diagram-toolbar { display: flex; gap: 8px; align-items: center; padding: 8px 12px; background: var(--surface); border-bottom: 1px solid var(--border); flex-wrap: wrap; flex: none; }
-.legend { display: flex; gap: 10px; flex-wrap: wrap; font-size: 0.75rem; }
+.layer-chip.off { opacity: 0.5; text-decoration: line-through; }
+
+.diagram-wrap {
+  flex: 1; min-height: 0; position: relative;
+  --dedge: #64748b; --sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+}
+@media (prefers-color-scheme: dark) { .diagram-wrap { --dedge: #8b9bb4; } }
+.diagram-wrap .react-flow { --xy-background-color: var(--bg); --xy-minimap-background-color: var(--surface); }
 .react-flow__attribution { display: none; }
+
+.dbox, .dgroup { --layer: #64748b; position: relative; width: 100%; height: 100%; box-sizing: border-box; font-family: var(--sans); color: var(--text); }
+.dbox { border: var(--box-border) solid var(--layer); border-radius: 8px; background: var(--surface); box-shadow: var(--shadow); text-align: center; }
+.dbox-body {
+  position: absolute; inset: 0; overflow: hidden; padding: var(--box-pad-y) var(--box-pad-x);
+  display: flex; flex-direction: column; justify-content: center; justify-content: safe center;
+}
+.dbox-body > * { flex: none; }
+.dbox-caption {
+  font-size: 10.5px; line-height: var(--box-caption); font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--layer); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.dbox-label {
+  font-size: 13px; line-height: var(--box-label-line); font-weight: 700; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden;
+}
+.dbox-path { font: 11px/var(--box-path-line) ui-monospace, Consolas, monospace; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dbox-role {
+  font-size: 12px; line-height: var(--box-role-line); color: var(--muted); overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden;
+}
+/* A closed group: a stack of cards. */
+.dbox.closed { box-shadow: 4px 4px 0 -2px var(--surface), 4px 4px 0 0 var(--layer), var(--shadow); }
+.dbox.made-up, .dgroup.made-up { border-style: dashed; }
+.dbox-open { all: unset; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+.dbox-open:hover, .dbox-open:focus-visible { color: var(--text); }
+.dbox.selected, .dgroup.selected { outline: 3px solid var(--primary); outline-offset: 2px; }
+
+.dgroup {
+  border: var(--box-border) solid color-mix(in srgb, var(--layer) 55%, transparent); border-radius: 12px;
+  background: color-mix(in srgb, var(--layer) 6%, transparent);
+}
+.dgroup-head {
+  height: var(--group-header); display: flex; align-items: center; gap: 6px; padding: 0 8px 0 4px;
+  border-bottom: 1px solid color-mix(in srgb, var(--layer) 30%, transparent); font-size: 13px; font-weight: 700;
+}
+.dgroup-label { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dgroup-count { flex: none; font-size: 10.5px; color: var(--layer); padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--layer) 14%, transparent); }
+.dgroup-toggle {
+  flex: none; width: 26px; height: 26px; border: 0; border-radius: 6px; background: transparent; color: var(--layer);
+  font-size: 14px; line-height: 1; cursor: pointer;
+}
+.dgroup-toggle:hover { background: color-mix(in srgb, var(--layer) 14%, transparent); }
+
+/* Connection points sit just inside the border, so React Flow's measurement puts arrow ends on the border.
+   Above the box text (which fills the box), or a drag from one would move the box instead of connecting it. */
+.diagram-wrap .react-flow__handle.dh {
+  width: 10px; height: 10px; min-width: 0; min-height: 0; border-radius: 50%;
+  background: var(--surface); border: 2px solid var(--layer); opacity: 0; z-index: 1;
+}
+.diagram-edit .react-flow__handle.dh { opacity: 1; }
+.diagram-wrap .react-flow__handle.dh-top { top: calc(-1 * var(--box-border)); left: 50%; transform: translate(-50%, 0); }
+.diagram-wrap .react-flow__handle.dh-bottom { top: auto; bottom: calc(-1 * var(--box-border)); left: 50%; transform: translate(-50%, 0); }
+.diagram-wrap .react-flow__handle.dh-left { left: calc(-1 * var(--box-border)); top: 50%; transform: translate(0, -50%); }
+.diagram-wrap .react-flow__handle.dh-right { left: auto; right: calc(-1 * var(--box-border)); top: 50%; transform: translate(0, -50%); }
+/* Resize handles (manual layout, selected box): wide enough to grab, with a thin line showing. */
+.react-flow__resize-control.line.dresize-line { border: 0; background: linear-gradient(var(--primary), var(--primary)) center / 2px 100% no-repeat; }
+.react-flow__resize-control.line.dresize-line.right { width: 10px; }
+.react-flow__resize-control.line.dresize-line.bottom { height: 10px; background-size: 100% 2px; }
+.react-flow__resize-control.handle.dresize-handle { width: 12px; height: 12px; border: 2px solid var(--surface); border-radius: 3px; background: var(--primary); }
+
+.dedge-path { fill: none; stroke: var(--dedge); }
+.dedge-head { fill: var(--dedge); }
+.react-flow__edge.lit .dedge-path, .react-flow__edge.selected .dedge-path { stroke: var(--primary); }
+.react-flow__edge.lit .dedge-head, .react-flow__edge.selected .dedge-head { fill: var(--primary); }
+.react-flow__edge.dim { opacity: 0.12; }
+.react-flow__edge.bundle .dedge-path { stroke-dasharray: 10 3; }
+/* A selected box's own arrows out of a packed group: drawn over the boxes, just to look at. */
+.react-flow__edge.revealed { pointer-events: none; }
+.dedge-label {
+  font: 11px var(--sans); fill: var(--text); pointer-events: none;
+  paint-order: stroke; stroke: var(--bg); stroke-width: 4px; stroke-linejoin: round;
+}
+.dedge-label.hover-only { display: none; }
+.react-flow__edge:hover .dedge-label.hover-only { display: inline; }
+
+.diagram-busy, .diagram-error {
+  position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); z-index: 6; pointer-events: none;
+  padding: 6px 14px; border-radius: 999px; font-size: 0.85rem; box-shadow: var(--shadow);
+}
+.diagram-busy { background: var(--surface); border: 1px solid var(--border); animation: diagram-fade-in 0.2s ease 0.35s both; }
+.diagram-error { background: var(--danger); color: #fff; border-radius: 8px; width: max-content; max-width: min(90%, 520px); white-space: normal; }
+@keyframes diagram-fade-in { from { opacity: 0; } to { opacity: 1; } }
+.diagram-empty { position: absolute; inset: 0; z-index: 4; display: grid; place-items: center; padding: 24px; text-align: center; color: var(--muted); pointer-events: none; }
+.diagram-inspector {
+  position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 6;
+  width: min(calc(100% - 24px), 640px); display: flex; gap: 10px; align-items: center; padding: 6px 6px 6px 14px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow-lg);
+}
+.diagram-inspector-text { display: grid; gap: 1px; min-width: 0; }
+.diagram-path { display: block; font: 0.85rem ui-monospace, Consolas, monospace; color: var(--muted); }
+.diagram-role { font-weight: 600; }
+.bundle-list { margin: 0; padding-left: 18px; max-height: 40vh; overflow: auto; font-size: 0.85rem; display: grid; gap: 2px; }
+.field-pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
+.mono, input.mono { font-family: ui-monospace, Consolas, monospace; }
 
 /* ---------- Login ---------- */
 .login-wrap { min-height: 100%; display: grid; place-items: center; padding: 16px; }
 .login-card { width: min(100%, 380px); padding: 24px; display: grid; gap: 14px; }
+.credit { margin: 0; text-align: center; }
 .error-text { color: var(--danger); font-size: 0.9rem; }
 .token-box { font-family: ui-monospace, Consolas, monospace; word-break: break-all; padding: 10px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; user-select: all; }
 

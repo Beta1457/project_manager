@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ApiError, onUnauthorized } from './api';
 import { useMe } from './hooks';
 import { ToastProvider } from './components/Toast';
+import { ConfirmHost } from './components/Confirm';
 import { Layout, MorePage } from './components/Layout';
 import { Spinner } from './components/Bits';
 import { ProjectProvider } from './project';
@@ -89,6 +90,7 @@ createRoot(document.getElementById('root')!).render(
         <BrowserRouter>
           <App />
         </BrowserRouter>
+        <ConfirmHost />
       </ToastProvider>
     </QueryClientProvider>
   </StrictMode>,

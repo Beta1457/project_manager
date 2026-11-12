@@ -19,7 +19,7 @@
     "presetup": "node scripts/check-node.mjs",
     "setup": "node scripts/setup.ts"
   },
-  "license": "MIT-0",
+  "license": "MIT",
   "dependencies": {
     "@fastify/cookie": "^11.1.5",
     "@fastify/multipart": "^10.1.8",

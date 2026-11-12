@@ -1,3 +1,5 @@
+import type { DiagramEdge, DiagramNode, DiagramSettings } from './diagram/model';
+
 export interface Status {
   id: string;
   label: string;
@@ -145,24 +147,8 @@ export interface TimeEntry {
   note: string;
 }
 
-export interface DiagramNode {
-  id: string;
-  label: string;
-  description: string;
-  layer: string;
-  x: number;
-  y: number;
-  width?: number;
-  height?: number;
-  link?: { kind: 'task' | 'epoch' | 'folder' | 'file'; id: number } | null;
-}
-
-export interface DiagramEdge {
-  id: string;
-  source: string;
-  target: string;
-  label: string;
-}
+// A diagram's boxes and arrows are typed with the diagram page's logic (diagram/model.ts), which the server's tests share.
+export type { DiagramEdge, DiagramNode, DiagramSettings };
 
 export interface Diagram {
   id: number;
@@ -170,7 +156,22 @@ export interface Diagram {
   version: number;
   nodes: DiagramNode[];
   edges: DiagramEdge[];
+  settings: DiagramSettings;
   updatedAt: string;
+}
+
+/** The most a diagram can hold, and how many groups deep a box can be. */
+export interface DiagramLimits {
+  nodes: number;
+  edges: number;
+  depth: number;
+}
+
+export interface DiagramList {
+  /** The usual layers, in order. Boxes can have others. */
+  layers: string[];
+  limits: DiagramLimits;
+  diagrams: Array<{ id: number; name: string; version: number; updatedAt: string; nodeCount: number; edgeCount: number }>;
 }
 
 export interface User {

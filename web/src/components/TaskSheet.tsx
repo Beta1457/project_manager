@@ -7,10 +7,12 @@ import { useToast } from './Toast';
 import { useMutate } from '../mutate';
 import { useTaskParam } from '../taskParam';
 import type { Task, TaskDetail } from '../types';
-import { timeAgo } from '../util';
+import { clip, formatMinutes, joinAnd, timeAgo } from '../util';
+import { useUndoableDelete } from '../undoableDelete';
 import { Markdown, Spinner, StatusPill } from './Bits';
+import { askConfirm } from './Confirm';
 import { folderPath } from './Filters';
-import { Sheet, confirmAction } from './Sheet';
+import { Sheet } from './Sheet';
 import { TimePanel } from './TimePanel';
 import { MarkdownEditor } from './MarkdownEditor';
 
@@ -59,8 +61,14 @@ function DeleteButton({ task, onDone }: { task: TaskDetail; onDone: () => void }
     <button
       className="btn btn-ghost btn-danger btn-sm"
       onClick={async () => {
-        if (!confirmAction(`Delete ${task.key} "${task.title}"? This cannot be undone.`)) return;
-        if (await mutate(() => api.del(`${V1}/tasks/${task.id}`), K, 'Task deleted')) onDone();
+        const goes = ['checklist', 'comments', 'links'];
+        if (task.loggedMinutes > 0) goes.push(`${formatMinutes(task.loggedMinutes)} of logged time`);
+        const ok = await askConfirm({
+          title: `Delete ${task.key}?`,
+          body: `"${task.title}" will be deleted, along with its ${joinAnd(goes)}. This can't be undone.`,
+          confirmLabel: 'Delete task',
+        });
+        if (ok && (await mutate(() => api.del(`${V1}/tasks/${task.id}`), K, 'Task deleted'))) onDone();
       }}
     >
       Delete
@@ -70,6 +78,11 @@ function DeleteButton({ task, onDone }: { task: TaskDetail; onDone: () => void }
 
 function TaskBody({ task }: { task: TaskDetail }) {
   const mutate = useMutate();
+  // Removed checklist items hide at once and are deleted when the Undo window closes.
+  const undoable = useUndoableDelete();
+  const checklistUrl = (itemId: number) => `${V1}/checklist/${itemId}`;
+  const checklistItems = task.checklistItems.filter((i) => !undoable.isHidden(checklistUrl(i.id)));
+  const checklistDone = checklistItems.filter((i) => i.done).length;
   const meta = useMeta().data;
   const epochs = useEpochs().data ?? [];
   const folders = useFolders().data ?? [];
@@ -262,13 +275,17 @@ function TaskBody({ task }: { task: TaskDetail }) {
 
       <div>
         <div className="section-title">
-          Checklist {task.checklistItems.length > 0 && `(${task.checklist.done}/${task.checklist.total})`}
+          Checklist {checklistItems.length > 0 && `(${checklistDone}/${checklistItems.length})`}
         </div>
-        {task.checklistItems.map((item) => (
+        {checklistItems.map((item) => (
           <div key={item.id} className={`checklist-item ${item.done ? 'done' : ''}`}>
             <input type="checkbox" checked={item.done} onChange={(e) => mutate(() => api.patch(`${V1}/checklist/${item.id}`, { done: e.target.checked }), K)} />
             <span className="grow">{item.text}</span>
-            <button className="btn btn-ghost btn-sm" aria-label="Remove item" onClick={() => mutate(() => api.del(`${V1}/checklist/${item.id}`), K)}>
+            <button
+              className="btn btn-ghost btn-sm"
+              aria-label={`Remove "${item.text}"`}
+              onClick={() => undoable.remove(checklistUrl(item.id), `Removed "${clip(item.text)}"`, K)}
+            >
               ✕
             </button>
           </div>
@@ -346,6 +363,9 @@ function useDebounced<T>(value: T, ms: number): T {
 /** Links to other tasks: list (click to open), remove, and add by searching title or key. */
 function LinksSection({ task }: { task: TaskDetail }) {
   const mutate = useMutate();
+  const undoable = useUndoableDelete();
+  const linkUrl = (otherId: number) => `${V1}/tasks/${task.id}/links/${otherId}`;
+  const links = task.links.filter((l) => !undoable.isHidden(linkUrl(l.task.id)));
   const [, openTask] = useTaskParam();
   const { project } = useProject();
   const [adding, setAdding] = useState(false);
@@ -382,7 +402,7 @@ function LinksSection({ task }: { task: TaskDetail }) {
   return (
     <div>
       <div className="row" style={{ justifyContent: 'space-between' }}>
-        <div className="section-title">Links {task.links.length > 0 && `(${task.links.length})`}</div>
+        <div className="section-title">Links {links.length > 0 && `(${links.length})`}</div>
         {!adding && <button className="btn btn-sm" onClick={() => setAdding(true)}>+ Link task</button>}
       </div>
       {task.openBlockers > 0 && (
@@ -390,7 +410,7 @@ function LinksSection({ task }: { task: TaskDetail }) {
           ⛔ Blocked by {task.openBlockers} open task{task.openBlockers > 1 ? 's' : ''} (not yet Alpha Complete)
         </div>
       )}
-      {task.links.map((l) => (
+      {links.map((l) => (
         <div key={l.id} className="link-row">
           <span className="link-label tiny muted">{l.label}</span>
           <a className="grow ellipsis" href={`?task=${l.task.id}`} onClick={(e) => open(e, l.task.id)}>
@@ -400,7 +420,7 @@ function LinksSection({ task }: { task: TaskDetail }) {
           <button
             className="btn btn-ghost btn-sm"
             aria-label={`Remove link to ${l.task.key}`}
-            onClick={() => mutate(() => api.del(`${V1}/tasks/${task.id}/links/${l.task.id}`), K, 'Link removed')}
+            onClick={() => undoable.remove(linkUrl(l.task.id), `Removed link to ${l.task.key}`, K)}
           >
             ✕
           </button>

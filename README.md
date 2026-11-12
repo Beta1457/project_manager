@@ -13,6 +13,9 @@ A self-hosted project tracker that runs on your own computer or home server. You
 - **Images in markdown**: drag, paste, or use 🖼 Add image (camera or gallery on phones) in any markdown field. Images are stored with your files and shown inline.
 - **Time tracking**: start/stop timers or manual entries on tasks and epochs. Epoch totals include their tasks, and a Time page shows totals by day and by task.
 - **Architecture diagram**: boxes and arrows colour-coded by layer, linked to tasks and epochs. Editable in the browser and through the API.
+  - **Automatic layout** with right-angled arrows, top to bottom or left to right, so a diagram with hundreds of boxes stays readable. Or switch a diagram to manual and place and size the boxes yourself.
+  - **Groups**: boxes can sit inside other boxes (a system and its classes). Close a group and its arrows are added up ("uses ×42"); hide whole layers.
+  - Each box can show its file path, a one-line role, and a size that follows how big the code is. Agents can rebuild the whole diagram in one import.
 - **Colour coding**: each Kanban column, task type, category, epoch and project has its own colour, editable in Settings.
 - **Live sync**: every change is saved immediately and shows up on every open device.
 - **Backups**: a snapshot every 4 hours (skipped if nothing changed), keeping 7 days.
@@ -118,7 +121,8 @@ pm task advance APP-5 --note "starting"
 pm task status APP-5 "Alpha QA" --note "12 tests pass"
 pm task link APP-5 blocked by APP-3
 pm time start --task APP-5   /   pm time stop   /   pm time log --task APP-5 --duration 45m
-pm diagram add-node --label AuthService --layer services   /   pm diagram connect AuthService Database
+pm diagram add-node --label AuthService --layer services --parent Backend   /   pm diagram connect AuthService Database
+pm diagram import diagram.json --yes        # many boxes and arrows in one save
 pm help
 ```
 
@@ -196,7 +200,7 @@ Everything lives in `data/`: `pm.db` (SQLite), `files/` (uploads), `backups/`, a
 | `PM_PORT` | `8080` | Port the server listens on |
 | `PM_HOST` | `0.0.0.0` | `0.0.0.0` lets other devices connect; `127.0.0.1` allows only this computer |
 | `PM_DATA_DIR` | `./data` | Database, uploads, backups and logs |
-| `PM_BACKUP_HOURS` | `4` | Hours between automatic backups |
+| `PM_BACKUP_HOURS` | `4` | Hours between automatic backups (`0` turns them off) |
 | `PM_BACKUP_KEEP` | `42` | Backups kept (42 × 4 h = 7 days) |
 | `PM_MAX_UPLOAD_MB` | `200` | Largest upload |
 | `PM_WEB_DIST` | `./web/dist` | Built web app to serve |
@@ -227,4 +231,4 @@ This app is built for a trusted home or office network, or a VPN into it:
 
 ## License
 
-Free and open source under [MIT No Attribution](LICENSE) (MIT-0): use, copy, change, share or sell it however you like, with no need to credit anyone.
+Free and open source under the [MIT License](LICENSE). You can use, copy, change, share or sell it, as long as copies keep the copyright notice (Bettafish Games, LLC) and the license text. The libraries it uses keep their own licenses; the diagram layout engine, [elkjs](https://github.com/kieler/elkjs), is under the Eclipse Public License 2.0 and is used unchanged.

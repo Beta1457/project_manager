@@ -28,8 +28,11 @@ export const setCurrentProject = (id: number | null) => {
 };
 export const getCurrentProject = () => currentProject;
 
-/** `project` overrides the current project (queries cached under one project fetch for that project). */
-async function request<T>(method: string, url: string, body?: unknown, project = currentProject): Promise<T> {
+/**
+ * `project` overrides the current project (queries cached under one project fetch for that project).
+ * `keepalive` lets the request finish after the page has closed.
+ */
+async function request<T>(method: string, url: string, body?: unknown, project = currentProject, keepalive = false): Promise<T> {
   const headers: Record<string, string> = { 'x-pm-client': 'web', 'x-pm-client-id': CLIENT_ID };
   if (project !== null) headers['x-pm-project'] = String(project);
   if (method !== 'GET') lastWriteStartedAt = Date.now();
@@ -42,7 +45,7 @@ async function request<T>(method: string, url: string, body?: unknown, project =
     headers['content-type'] = 'application/json';
     payload = '{}';
   }
-  const res = await fetch(url, { method, headers, body: payload, credentials: 'same-origin' });
+  const res = await fetch(url, { method, headers, body: payload, credentials: 'same-origin', keepalive });
   const text = await res.text();
   let data: unknown = undefined;
   try {
@@ -64,6 +67,8 @@ export const api = {
   patch: <T>(url: string, body: unknown) => request<T>('PATCH', url, body),
   put: <T>(url: string, body: unknown) => request<T>('PUT', url, body),
   del: <T>(url: string) => request<T>('DELETE', url),
+  /** A delete sent while the page unloads (it completes even though the page is gone). */
+  delOnUnload: (url: string) => request('DELETE', url, undefined, currentProject, true),
 };
 
 export const V1 = '/api/v1';

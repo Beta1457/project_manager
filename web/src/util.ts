@@ -69,6 +69,21 @@ export function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/** "1 task", "3 tasks"; pass the plural for irregular words ("box", "boxes"). */
+export function plural(n: number, word: string, pluralWord = `${word}s`): string {
+  return `${n} ${n === 1 ? word : pluralWord}`;
+}
+
+/** "a", "a and b", "a, b and c". */
+export function joinAnd(items: string[]): string {
+  return items.length <= 1 ? (items[0] ?? '') : `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
+}
+
+/** Shortens text for messages: "A very long checklist it…". */
+export function clip(text: string, max = 40): string {
+  return text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text;
+}
+
 /**
  * Copies text to the clipboard. The Clipboard API only exists on HTTPS/localhost, and this app is
  * usually opened over plain-HTTP LAN (http://192.168.x.x:8080), so fall back to execCommand.

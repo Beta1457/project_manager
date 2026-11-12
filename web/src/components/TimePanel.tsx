@@ -3,7 +3,7 @@ import { api, V1 } from '../api';
 import { useRunningTimer, useTime } from '../hooks';
 import { useMutate } from '../mutate';
 import { formatMinutes, timeAgo } from '../util';
-import { confirmAction } from './Sheet';
+import { askConfirm } from './Confirm';
 
 interface Props {
   taskId?: number;
@@ -85,8 +85,15 @@ export function TimePanel({ taskId, epochId, loggedMinutes, estimateMinutes, ext
               {!e.running && (
                 <button
                   className="btn btn-ghost btn-sm"
-                  aria-label="Delete entry"
-                  onClick={() => confirmAction('Delete this time entry?') && mutate(() => api.del(`${V1}/time/${e.id}`), TIME_KINDS)}
+                  aria-label={`Delete the ${formatMinutes(e.minutes)} entry`}
+                  onClick={async () => {
+                    const ok = await askConfirm({
+                      title: 'Delete time entry?',
+                      body: `${formatMinutes(e.minutes)} logged by ${e.actor} ${timeAgo(e.startedAt)}${e.note ? ` ("${e.note}")` : ''} will be removed from the totals. This can't be undone.`,
+                      confirmLabel: 'Delete entry',
+                    });
+                    if (ok) await mutate(() => api.del(`${V1}/time/${e.id}`), TIME_KINDS);
+                  }}
                 >
                   ✕
                 </button>
