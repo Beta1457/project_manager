@@ -127,7 +127,7 @@ export function NewProjectForm({ projects = [], onCreated, submitLabel = 'Create
       <div className="row">
         <label className="row nowrap small">Colour <input type="color" value={color} onChange={(e) => setColor(e.target.value)} /></label>
         {projects.length > 0 && (
-          <label className="row nowrap small grow">Copy types, colours and categories from
+          <label className="row nowrap small grow">Copy types, colours, categories and templates from
             <select value={copyFrom} onChange={(e) => setCopyFrom(e.target.value)} style={{ width: 'auto' }}>
               <option value="">Nothing (defaults)</option>
               {projects.map((p) => <option key={p.id} value={p.id}>{p.key} · {p.name}</option>)}

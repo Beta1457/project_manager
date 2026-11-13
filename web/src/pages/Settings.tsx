@@ -2,16 +2,17 @@ import { useEffect, useRef, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, V1 } from '../api';
-import { useMe, useMeta } from '../hooks';
+import { useMe, useMeta, useTemplates } from '../hooks';
 import { useMutate } from '../mutate';
 import { copyText, formatBytes, plural, timeAgo } from '../util';
-import type { Project } from '../types';
+import type { Project, Template } from '../types';
 import { NewProjectForm, PROJECT_KEY_RE } from '../project';
 import { useProject } from '../projectContext';
 import { useToast } from '../components/Toast';
 import { PageHeader } from '../components/Layout';
 import { askConfirm } from '../components/Confirm';
 import { ColorInput, Credit, StatusPill, TypeBadge } from '../components/Bits';
+import { TemplateEditor, TemplateSummary } from '../components/Templates';
 
 interface Token { id: number; name: string; prefix: string; createdAt: string; lastUsedAt: string | null; owner: string }
 interface UserRow { id: number; username: string; isAdmin: boolean; projectCount: number; createdAt: string }
@@ -29,6 +30,7 @@ export function SettingsPage() {
           <BoardColumns />
           <Types />
           <Categories />
+          <Templates />
           <Tokens />
           {isAdmin && <Users />}
           {isAdmin && <BackupsCard />}
@@ -185,6 +187,46 @@ function Categories() {
         <input placeholder="New category" value={name} onChange={(e) => setName(e.target.value)} />
         <button className="btn" type="submit" disabled={!name.trim()}>Add</button>
       </form>
+    </section>
+  );
+}
+
+function Templates() {
+  const templates = useTemplates().data ?? [];
+  const mutate = useMutate();
+  const [editing, setEditing] = useState<Template | 'new' | null>(null);
+  const remove = async (t: Template) => {
+    const ok = await askConfirm({
+      title: `Delete the template "${t.name}"?`,
+      body: 'Tasks already made from it stay as they are. This can’t be undone.',
+      confirmLabel: 'Delete template',
+    });
+    if (ok) await mutate(() => api.del(`${V1}/templates/${t.id}`), ['templates'], 'Template deleted');
+  };
+  return (
+    <section className="card panel stack">
+      <div className="row">
+        <h2 className="grow">Task templates<ForProject /></h2>
+        <button className="btn btn-sm" onClick={() => setEditing('new')}>+ New template</button>
+      </div>
+      <p className="small muted" style={{ margin: 0 }}>
+        Start a task, and its sub-tasks, from a template: pick one in New task. To make one from a task you already have, open it and
+        choose Save as template.
+      </p>
+      {templates.map((t) => (
+        <div key={t.id} className="template-row">
+          <div className="grow" style={{ minWidth: 0 }}>
+            <div style={{ fontWeight: 600 }}>{t.name}</div>
+            <TemplateSummary template={t} />
+          </div>
+          <div className="row nowrap">
+            <button className="btn btn-sm" onClick={() => setEditing(t)} aria-label={`Edit template ${t.name}`}>Edit</button>
+            <button className="btn btn-ghost btn-danger btn-sm" aria-label={`Delete template ${t.name}`} onClick={() => remove(t)}>✕</button>
+          </div>
+        </div>
+      ))}
+      {templates.length === 0 && <p className="small muted" style={{ margin: 0 }}>No templates yet.</p>}
+      {editing && <TemplateEditor template={editing === 'new' ? null : editing} onClose={() => setEditing(null)} />}
     </section>
   );
 }

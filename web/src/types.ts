@@ -55,6 +55,11 @@ export interface Task {
   checklist: { done: number; total: number };
   /** Tasks blocking this one that haven't reached Alpha Complete. */
   openBlockers: number;
+  /** The task this one is a sub-task of (same project), or null. */
+  parentId: number | null;
+  parent: { id: number; key: string; title: string } | null;
+  /** Its sub-tasks; `done` counts those at Alpha Complete or later. */
+  subtasks: { done: number; total: number };
   categories: Category[];
   sortOrder: number;
   createdBy: string;
@@ -88,7 +93,32 @@ export interface TaskLink {
 export interface TaskDetail extends Task {
   checklistItems: ChecklistItem[];
   links: TaskLink[];
+  /** Its sub-tasks, oldest first (without descriptions). */
+  children: Task[];
   activity: Activity[];
+}
+
+/** A task as a template stores it. Types, categories and epochs are names, looked up when the template is used. */
+export interface TemplateTask {
+  title: string;
+  description: string;
+  type: string | null;
+  priority: string | null;
+  categories: string[];
+  estimateMinutes: number | null;
+  checklist: string[];
+  /** Null: where the task is added (a sub-task: where its parent is). */
+  epoch: string | null;
+}
+
+export interface Template extends TemplateTask {
+  id: number;
+  projectId: number;
+  name: string;
+  subtasks: TemplateTask[];
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface Epoch {
@@ -126,7 +156,7 @@ export interface FileItem {
 export interface Tree {
   folders: Folder[];
   epochs: Array<{ id: number; name: string; color: string; folderId: number | null; total: number; shipped: number }>;
-  tasks: Array<{ id: number; key: string; title: string; status: string; type: string; folderId: number | null; epochId: number | null }>;
+  tasks: Array<{ id: number; key: string; title: string; status: string; type: string; folderId: number | null; epochId: number | null; parentId: number | null }>;
   files: FileItem[];
 }
 

@@ -1,11 +1,13 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type MouseEvent } from 'react';
 import { useTasks } from '../hooks';
+import { useTaskSelection } from '../selection';
 import type { Task } from '../types';
+import { BulkBar } from '../components/BulkBar';
 import { FilterBar, useFilters } from '../components/Filters';
 import { PageHeader, useTaskParam } from '../components/Layout';
 import { CategoryChip, PriorityBadge, Spinner, StatusPill, TypeBadge } from '../components/Bits';
 import { TaskCard } from '../components/TaskCard';
-import { formatMinutes, timeAgo } from '../util';
+import { cx, formatMinutes, timeAgo } from '../util';
 
 type SortKey = 'id' | 'title' | 'status' | 'priority' | 'type' | 'epochName' | 'loggedMinutes' | 'updatedAt';
 const PRIORITY_RANK: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
@@ -25,6 +27,9 @@ function compare(a: Task, b: Task, key: SortKey): number {
   }
 }
 
+// The checkboxes are ticked in onClick, which also knows about Shift; React wants an onChange on a controlled box.
+const noop = () => {};
+
 export function ListPage() {
   const [filters] = useFilters();
   const { data: tasks, isLoading } = useTasks(filters);
@@ -32,6 +37,17 @@ export function ListPage() {
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: 'updatedAt', dir: -1 });
 
   const sorted = useMemo(() => [...(tasks ?? [])].sort((a, b) => compare(a, b, sort.key) * sort.dir), [tasks, sort]);
+  const ordered = useMemo(() => sorted.map((t) => t.id), [sorted]);
+  const selection = useTaskSelection(ordered);
+  const selectedTasks = useMemo(() => sorted.filter((t) => selection.has(t.id)), [sorted, selection]);
+  const allSelected = sorted.length > 0 && selectedTasks.length === sorted.length;
+
+  /** A row click opens the task; with Ctrl/Cmd it ticks the row, with Shift everything from the last ticked row. */
+  const rowClick = (e: MouseEvent, t: Task) => {
+    if (e.shiftKey || e.ctrlKey || e.metaKey) selection.toggle(t.id, e.shiftKey);
+    else openTask(t.id);
+  };
+
   const th = (key: SortKey, label: string, cls = '') => (
     <th className={cls} onClick={() => setSort((s) => ({ key, dir: s.key === key ? (s.dir === 1 ? -1 : 1) : 1 }))}>
       {label} {sort.key === key ? (sort.dir === 1 ? '▲' : '▼') : ''}
@@ -43,7 +59,7 @@ export function ListPage() {
       <PageHeader title={`List${tasks ? ` (${tasks.length})` : ''}`} />
       <div className="content flush">
         <FilterBar />
-        <div style={{ flex: 1, overflow: 'auto' }}>
+        <div className={cx(selection.active && 'selecting')} style={{ flex: 1, overflow: 'auto' }}>
           {isLoading ? (
             <Spinner />
           ) : !sorted.length ? (
@@ -62,10 +78,16 @@ export function ListPage() {
                     <option value="id:-1">Newest</option>
                     <option value="title:1">Title</option>
                   </select>
+                  <span className="grow" />
+                  <button type="button" className={cx('btn btn-sm select-toggle', selection.mode && 'on')} aria-pressed={selection.mode}
+                    onClick={() => (selection.mode ? selection.clear() : selection.setMode(true))}>
+                    Select
+                  </button>
                 </div>
                 {sorted.map((t) => (
                   <div key={t.id}>
-                    <TaskCard task={t} onOpen={openTask} />
+                    <TaskCard task={t} onOpen={openTask}
+                      select={{ selected: selection.has(t.id), tapSelects: selection.mode, onToggle: (range) => selection.toggle(t.id, range) }} />
                     <div style={{ marginTop: -4 }} />
                   </div>
                 ))}
@@ -73,6 +95,17 @@ export function ListPage() {
               <table className="list-table hide-mobile">
                 <thead>
                   <tr>
+                    <th className="select-col">
+                      <input
+                        type="checkbox"
+                        aria-label={allSelected ? 'Clear the selection' : `Select all ${sorted.length} tasks`}
+                        checked={allSelected}
+                        ref={(el) => {
+                          if (el) el.indeterminate = selectedTasks.length > 0 && !allSelected;
+                        }}
+                        onChange={() => (allSelected ? selection.clear() : selection.selectAll())}
+                      />
+                    </th>
                     {th('id', 'Key')}
                     {th('title', 'Title')}
                     {th('status', 'Status')}
@@ -86,9 +119,33 @@ export function ListPage() {
                 </thead>
                 <tbody>
                   {sorted.map((t) => (
-                    <tr key={t.id} onClick={() => openTask(t.id)} tabIndex={0} onKeyDown={(e) => e.key === 'Enter' && openTask(t.id)}>
+                    <tr
+                      key={t.id}
+                      className={cx(selection.has(t.id) && 'selected')}
+                      onClick={(e) => rowClick(e, t)}
+                      // Shift+click picks a range of rows, not a stretch of text.
+                      onMouseDown={(e) => e.shiftKey && e.preventDefault()}
+                      tabIndex={0}
+                      onKeyDown={(e) => {
+                        if (e.target !== e.currentTarget) return;
+                        if (e.key === 'Enter') openTask(t.id);
+                        else if (e.key === ' ') {
+                          e.preventDefault();
+                          selection.toggle(t.id, e.shiftKey);
+                        }
+                      }}
+                    >
+                      {/* The whole cell ticks the box: an easier target than the box alone. */}
+                      <td className="select-col" onClick={(e) => { e.stopPropagation(); selection.toggle(t.id, e.shiftKey); }}>
+                        <input type="checkbox" checked={selection.has(t.id)} aria-label={`Select ${t.key}`} onChange={noop}
+                          onClick={(e) => { e.stopPropagation(); selection.toggle(t.id, e.shiftKey); }} />
+                      </td>
                       <td className="key">{t.key}</td>
-                      <td style={{ fontWeight: 600 }}>{t.title}</td>
+                      <td>
+                        {t.parent && <span className="tiny muted" title={`Sub-task of ${t.parent.key} "${t.parent.title}"`}>↳ {t.parent.key} </span>}
+                        <span style={{ fontWeight: 600 }}>{t.title}</span>
+                        {t.subtasks.total > 0 && <span className="tiny muted"> · sub-tasks {t.subtasks.done}/{t.subtasks.total}</span>}
+                      </td>
                       <td><StatusPill status={t.status} label={t.statusLabel} /></td>
                       <td><PriorityBadge priority={t.priority} /></td>
                       <td><TypeBadge type={t.type} /></td>
@@ -103,6 +160,7 @@ export function ListPage() {
             </>
           )}
         </div>
+        <BulkBar selection={selection} tasks={selectedTasks} total={sorted.length} />
       </div>
     </>
   );

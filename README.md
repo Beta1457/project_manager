@@ -2,12 +2,18 @@
 
 A self-hosted project tracker that runs on your own computer or home server. You use it from a phone or desktop browser, and **your AI coding agent uses it too** (Claude Code, or agents that read `AGENTS.md` such as Codex, Cursor and Copilot): it creates and updates tasks, tracks its time and keeps an architecture diagram in sync while it codes. Your data stays in one folder on your machine, and nothing is sent anywhere else.
 
+![The board: a column per status, each card showing its epoch, key, type, categories, priority, checklist progress and logged time](docs/images/board.png)
+
 - **Projects**: as many as you like, each with its own task keys (`APP-12`, `WEB-3`), board, epochs, files, diagram, task types and categories. Each account only ever sees its own projects.
 - **Kanban board**: Open → In Progress → Alpha QA → Alpha Complete → Beta In Progress → Beta QA → Beta Complete → Ready to Ship. Drag and drop on desktop; on phones, one column at a time with ◀ / Move to… / ▶ buttons.
 - **Tasks**: title, type, status, priority, categories, markdown description, checklist, estimate, links between tasks (blocks / blocked by / duplicates / relates to) and an activity log of who moved what, Claude included.
+  - **Sub-tasks**: full tasks under a parent, each in its own epoch if you like (a card's art and sound in the Art and Audio epochs). The parent shows how many are done.
+  - **Templates**: save a task, sub-tasks included, as a template, then make new ones from it in one go. `{title}` in a template becomes the new task's name.
+  - **Multi-select**: tick several tasks on the board or in the list (or Ctrl/Shift+click; **Select** on phones) to change their status, epoch, priority, type, categories or parent at once, drag them together, or delete them.
 - **Filters**: search (text or a key like `APP-12`), status, type, category, priority, epoch, folder, creator. They live in the URL, so filtered views can be bookmarked.
 - **Epochs**: containers for tasks (a release, a milestone, a feature area), with progress bars, target dates, estimates and their own board.
 - **Explorer**: a folder tree holding folders, epochs, tasks and uploaded files. Drag and drop, or ⋯ → Move to on phones.
+  - **Right-click menu** (⋯ on phones): add, cut, copy, paste, duplicate, rename or delete anything. Copying a folder copies everything in it, sub-tasks and files included, and documents in the copy point at the copied images. Keyboard shortcuts work too: Ctrl+C / X / V, F2 and Delete.
   - **Markdown documents** can be created and edited in the browser, and they autosave.
   - **HTML pages and SVGs** show a live preview (Preview/Source tabs, "Open full page"). Upload a page's images, stylesheets and other pages in the same folder layout as on disk, and they load and link to each other. Scripts run sandboxed, with no access to your login or the API.
 - **Images in markdown**: drag, paste, or use 🖼 Add image (camera or gallery on phones) in any markdown field. Images are stored with your files and shown inline.
@@ -19,6 +25,34 @@ A self-hosted project tracker that runs on your own computer or home server. You
 - **Colour coding**: each Kanban column, task type, category, epoch and project has its own colour, editable in Settings.
 - **Live sync**: every change is saved immediately and shows up on every open device.
 - **Backups**: a snapshot every 4 hours (skipped if nothing changed), keeping 7 days.
+
+## Screenshots
+
+Taken from made-up demo data (`node scripts/screenshots.ts` takes them again).
+
+**A task and its sub-tasks**, each sub-task in an epoch of its own:
+
+![A task panel beside the board, listing three sub-tasks with their epochs and statuses](docs/images/task.png)
+
+**A new task from a template**, which adds a checklist and three sub-tasks:
+
+![The New task dialog with the "Boss fight" template chosen and a summary of what it will create](docs/images/template.png)
+
+**The Explorer's right-click menu**:
+
+![The Explorer's folder tree with the right-click menu and its New submenu open](docs/images/explorer-menu.png)
+
+**An architecture diagram** of 30 systems with 10 classes each, every system closed and the arrows between them added up:
+
+![An architecture diagram of 30 systems, coloured by layer, with right-angled arrows between them](docs/images/diagram-overview.png)
+
+**One system opened**: each class shows its file path and role, and arrows to the other systems are counted:
+
+![The Combat system opened in the diagram: its classes with their paths and roles, and counted arrows to other systems](docs/images/diagram-detail.png)
+
+**On a phone**, one column at a time:
+
+<img src="docs/images/phone-board.png" alt="The board on a phone: status tabs above one column of cards, and a tab bar at the bottom" width="260">
 
 ## Requirements
 
@@ -50,6 +84,8 @@ Then start the server:
 Open `http://localhost:8080` on the server itself, or `http://<server address>:8080` from your phone or another computer (setup prints the address). Sign in, and the app asks you to create your first project.
 
 **Phone tip:** in your browser's menu, choose **Add to Home screen**. The app then opens full-screen like a native app.
+
+**Page won't load on Android?** Newer Android versions make apps ask before they can reach devices on your home network ("Nearby devices"). Without that permission the page doesn't load, and Chrome shows `ERR_TOO_MANY_RETRIES`. Allow it in **Settings → Apps → Chrome** (or your browser) **→ Permissions → Nearby devices**.
 
 ## Projects and accounts
 
@@ -208,13 +244,15 @@ Everything lives in `data/`: `pm.db` (SQLite), `files/` (uploads), `backups/`, a
 ## Development
 
 ```
-npm run dev              # API server with auto-reload, on PM_PORT
-npm --prefix web run dev # UI dev server on :5173 (proxies /api to PM_PORT)
-npm test                 # API integration tests
+npm run dev                 # API server with auto-reload, on PM_PORT
+npm --prefix web run dev    # UI dev server on :5173 (proxies /api to PM_PORT)
+npm test                    # API integration tests
 npm run typecheck
+node scripts/demo-seed.ts   # fill a new, empty data folder with demo data (how: see the top of the file)
+node scripts/screenshots.ts # retake the README screenshots from demo data (uses Edge, Chrome or Chromium)
 ```
 
-Layout: `server/` (Fastify + node:sqlite, TypeScript run natively by Node), `web/` (React + Vite), `tools/` (CLI + agent skill), `scripts/` (setup, installers, accounts, backup, Windows service), `test/`.
+Layout: `server/` (Fastify + node:sqlite, TypeScript run natively by Node), `web/` (React + Vite), `tools/` (CLI + agent skill), `scripts/` (setup, installers, accounts, backup, Windows service, demo data, screenshots), `test/`.
 
 ## Security
 

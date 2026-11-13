@@ -14,7 +14,7 @@ export interface NewProject {
   key: string;
   name: string;
   color?: string;
-  /** Copy task types, categories and column colours from this project (same owner). */
+  /** Copy task types, categories, column colours and task templates from this project (same owner). */
   copyFrom?: number | null;
   /** Starting categories as [name, color] (used when not copying). */
   categories?: Array<[string, string]>;
@@ -23,7 +23,7 @@ export interface NewProject {
 function normalizeKey(raw: string): string {
   const key = raw.trim().toUpperCase();
   if (!PROJECT_KEY_RE.test(key)) {
-    throw badRequest('Project key must start with a letter and have at most 10 letters or digits (e.g. BH or GAME2). It prefixes task keys: BH-12.');
+    throw badRequest('Project key must start with a letter and have at most 10 letters or digits (e.g. APP or GAME2). It prefixes task keys: APP-12.');
   }
   return key;
 }
@@ -50,6 +50,7 @@ export function createProject(db: DB, ownerId: number, input: NewProject): numbe
       db.prepare('INSERT INTO task_types (project_id, name, sort_order, color) SELECT ?, name, sort_order, color FROM task_types WHERE project_id = ?').run(id, source.id);
       db.prepare('INSERT INTO status_colors (project_id, status, color) SELECT ?, status, color FROM status_colors WHERE project_id = ?').run(id, source.id);
       db.prepare('INSERT INTO categories (project_id, name, color) SELECT ?, name, color FROM categories WHERE project_id = ?').run(id, source.id);
+      db.prepare('INSERT INTO task_templates (project_id, name, data, created_by) SELECT ?, name, data, created_by FROM task_templates WHERE project_id = ?').run(id, source.id);
     } else {
       const addType = db.prepare('INSERT INTO task_types (project_id, name, sort_order, color) VALUES (?, ?, ?, ?)');
       DEFAULT_TYPES.forEach((t, i) => addType.run(id, t, i, DEFAULT_TYPE_COLORS[t] ?? '#64748b'));

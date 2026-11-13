@@ -63,7 +63,7 @@ function authHeaders() {
 // ------------------------------------------------------------------ args ----
 
 const REPEATABLE = new Set(['check']);
-const BOOLEAN = new Set(['json', 'undo', 'help', 'remove', 'delete-time', 'replace', 'yes', 'with-children']);
+const BOOLEAN = new Set(['json', 'undo', 'help', 'remove', 'delete-time', 'replace', 'yes', 'with-children', 'with-subtasks']);
 
 function parseArgs(argv) {
   const pos = [];
@@ -232,9 +232,15 @@ function printTask(t, detail = false) {
   const cats = t.categories?.map((c) => c.name).join(', ');
   console.log(`${t.key}  [${t.statusLabel}]  ${t.title}${t.openBlockers ? `  BLOCKED by ${t.openBlockers} open task${t.openBlockers > 1 ? 's' : ''}` : ''}`);
   console.log(`  type=${t.type} priority=${t.priority}${t.epochName ? ` epoch="${t.epochName}"` : ''}${cats ? ` categories=${cats}` : ''}` +
-    ` time=${fmtMin(t.loggedMinutes)}${t.estimateMinutes ? `/${fmtMin(t.estimateMinutes)}` : ''}`);
+    ` time=${fmtMin(t.loggedMinutes)}${t.estimateMinutes ? `/${fmtMin(t.estimateMinutes)}` : ''}` +
+    `${t.parent ? ` parent=${t.parent.key}` : ''}${t.subtasks?.total ? ` subtasks=${t.subtasks.done}/${t.subtasks.total} done` : ''}`);
   if (!detail) return;
+  if (t.parent) console.log(`  sub-task of ${t.parent.key} "${t.parent.title}"`);
   if (t.description) console.log(`\n${t.description}\n`);
+  if (t.children?.length) {
+    console.log('Sub-tasks:');
+    for (const c of t.children) printSubtask(c);
+  }
   if (t.checklistItems?.length) {
     console.log('Checklist:');
     for (const i of t.checklistItems) console.log(`  [${i.done ? 'x' : ' '}] #${i.id} ${i.text}`);
@@ -247,6 +253,34 @@ function printTask(t, detail = false) {
     console.log('Recent activity:');
     for (const a of t.activity.slice(0, 10)) console.log(`  ${a.createdAt.slice(0, 16).replace('T', ' ')} ${a.actor}: ${a.message}`);
   }
+}
+
+/** One line per sub-task: key, status, title and where it lives when that is an epoch. */
+function printSubtask(c) {
+  console.log(`  ${c.key} [${c.statusLabel}] ${c.title}${c.epochName ? `  (epoch "${c.epochName}")` : ''}`);
+}
+
+/** Something a user would type as a task: APP-12, app-12, 12 or #12. */
+const KEY_LIKE = /^#?\d+$|^[A-Za-z][A-Za-z0-9]{0,9}-\d+$/;
+
+/**
+ * The task keys at the start of a command line, and the words after them:
+ * "APP-1 APP-2 12 Alpha QA" → keys APP-1, APP-2 and APP-12 (in the current project), rest "Alpha QA".
+ */
+async function leadingKeys(args) {
+  const end = args.findIndex((a) => !KEY_LIKE.test(String(a).trim()));
+  const raw = end === -1 ? args : args.slice(0, end);
+  if (!raw.length) await taskRef(args[0]); // says what's wrong with the first word, or that there's none
+  const keys = [];
+  for (const r of raw) keys.push(await taskRef(r));
+  return { keys: [...new Set(keys)], rest: end === -1 ? [] : args.slice(end) };
+}
+
+/** --parent APP-3 → "APP-3"; none (also null or empty) → null, meaning a top-level task. */
+async function parentRef(raw) {
+  if (raw === undefined) return undefined;
+  if (/^(none|null|)$/i.test(String(raw).trim())) return null;
+  return taskRef(raw, 'parent task key');
 }
 
 /** "1 box", "3 boxes". */
@@ -295,38 +329,67 @@ const commands = {
       case 'ls': {
         const epoch = await resolveEpoch(flags.epoch);
         const folder = flags.folder === 'inbox' ? 'inbox' : await resolveFolder(flags.folder);
+        const parent = /^(none|any)$/i.test(String(flags.parent ?? '')) ? String(flags.parent).toLowerCase() : await parentRef(flags.parent);
         const r = await get('/api/v1/tasks' + qs({
           q: flags.q ?? rest.join(' '), status: flags.status, type: flags.type, category: flags.category,
           priority: flags.priority, epoch: epoch === null ? 'none' : epoch, folder, createdBy: flags['created-by'],
+          parent: parent === null ? 'none' : parent,
         }));
         return out(flags, r.tasks, (ts) => (ts.length ? ts.forEach((t) => printTask(t)) : console.log('No tasks found.')));
       }
       case 'get':
       case 'show':
         return out(flags, await get(`/api/v1/tasks/${await taskRef(rest[0])}`), (t) => printTask(t, true));
+      case 'subtasks': {
+        const t = await get(`/api/v1/tasks/${await taskRef(rest[0])}`);
+        return out(flags, t.children, (cs) => {
+          if (!cs.length) return console.log(`${t.key} has no sub-tasks.${t.parent ? ` It is a sub-task of ${t.parent.key}.` : ''}`);
+          console.log(`${t.key} "${t.title}": ${t.subtasks.done}/${t.subtasks.total} sub-tasks done (Alpha Complete or later)`);
+          cs.forEach(printSubtask);
+        });
+      }
       case 'create':
       case 'new': {
         const body = taskBody(flags);
-        if (!body.title) body.title = rest.join(' ');
-        if (!body.title) fail('Provide --title "..."');
+        if (!body.title && rest.length) body.title = rest.join(' ');
+        // With a template the server decides whether a title is needed (only when the template's has {title}).
+        if (flags.template !== undefined) body.template = String(flags.template);
+        else if (!body.title) fail('Provide --title "..."');
         const epochId = await resolveEpoch(flags.epoch);
         if (epochId !== undefined) body.epochId = epochId;
         const folderId = await resolveFolder(flags.folder);
         if (folderId !== undefined) body.folderId = folderId;
         if (flags.check) body.checklist = flags.check;
+        const parent = await parentRef(flags.parent);
+        if (parent !== undefined) body.parent = parent;
         const t = await post('/api/v1/tasks', body);
-        return out(flags, t, () => { console.log(`Created ${t.key}`); printTask(t); });
+        return out(flags, t, () => {
+          console.log(`Created ${t.key}${t.children?.length ? ` with ${plural(t.children.length, 'sub-task', 'sub-tasks')}` : ''}`);
+          printTask(t);
+          for (const c of t.children ?? []) printSubtask(c);
+          for (const w of t.warnings ?? []) console.log(`Note: ${w}`);
+        });
       }
       case 'update':
       case 'edit': {
-        const key = await taskRef(rest[0]);
+        // Several keys: one request that changes them all, or none of them if one change is refused.
+        const { keys, rest: extra } = await leadingKeys(rest);
+        if (extra.length) fail(`"${extra[0]}" is not a task key. Give the changes as flags: pm task update APP-12 [APP-13 ...] --priority high`);
         const body = taskBody(flags);
         const epochId = await resolveEpoch(flags.epoch);
         if (epochId !== undefined) body.epochId = epochId;
         const folderId = await resolveFolder(flags.folder);
         if (folderId !== undefined) body.folderId = folderId;
-        if (!Object.keys(body).length) fail('Nothing to update. Use --title, --desc, --type, --priority, --category, --epoch, --folder, --estimate, --status');
-        return out(flags, await patch(`/api/v1/tasks/${key}`, body), (t) => { console.log(`Updated ${t.key}`); printTask(t); });
+        const parent = await parentRef(flags.parent);
+        if (parent !== undefined) body.parent = parent;
+        if (!Object.keys(body).length) fail('Nothing to update. Use --title, --desc, --type, --priority, --category, --epoch, --folder, --estimate, --status, --parent');
+        if (keys.length === 1) return out(flags, await patch(`/api/v1/tasks/${keys[0]}`, body), (t) => { console.log(`Updated ${t.key}`); printTask(t); });
+        if (body.title !== undefined || body.description !== undefined) fail('--title and --desc change one task at a time; the other flags work on several.');
+        const r = await post('/api/v1/tasks/bulk', { action: 'update', ids: keys, set: body });
+        return out(flags, r.tasks, (ts) => {
+          console.log(`Updated ${plural(ts.length, 'task', 'tasks')}`);
+          ts.forEach((t) => printTask(t));
+        });
       }
       case 'advance':
       case 'next': {
@@ -335,10 +398,14 @@ const commands = {
       }
       case 'status':
       case 'move': {
-        const key = await taskRef(rest[0]);
-        const status = need(flags.status ?? rest.slice(1).join(' '), 'status');
-        const t = await post(`/api/v1/tasks/${key}/status`, { status, note: flags.note });
-        return out(flags, t, () => console.log(`${t.key} → ${t.statusLabel}`));
+        const { keys, rest: words } = await leadingKeys(rest);
+        const status = need(flags.status ?? words.join(' '), 'status');
+        if (keys.length === 1) {
+          const t = await post(`/api/v1/tasks/${keys[0]}/status`, { status, note: flags.note });
+          return out(flags, t, () => console.log(`${t.key} → ${t.statusLabel}`));
+        }
+        const r = await post('/api/v1/tasks/bulk', { action: 'update', ids: keys, set: { status, note: flags.note } });
+        return out(flags, r.tasks, (ts) => ts.forEach((t) => console.log(`${t.key} → ${t.statusLabel}`)));
       }
       case 'note':
       case 'comment': {
@@ -375,11 +442,105 @@ const commands = {
       case 'delete':
       case 'rm': {
         const key = await taskRef(rest[0]);
-        await del(`/api/v1/tasks/${key}`);
+        const { subtasks } = await get(`/api/v1/tasks/${key}`);
+        const withSubtasks = !!flags['with-subtasks'];
+        const r = await del(`/api/v1/tasks/${key}${withSubtasks ? '?withSubtasks=true' : ''}`);
+        if (withSubtasks && r.deleted > 1) return console.log(`Deleted ${key} and its ${plural(r.deleted - 1, 'sub-task', 'sub-tasks')}`);
+        if (subtasks.total && !withSubtasks) {
+          return console.log(`Deleted ${key}. Its ${plural(subtasks.total, 'sub-task is', 'sub-tasks are')} now top-level (--with-subtasks deletes them too).`);
+        }
         return console.log(`Deleted ${key}`);
       }
       default:
-        fail(`Unknown task command "${sub ?? ''}". Try: list, get, create, update, advance, status, note, check, link, unlink, delete`);
+        fail(`Unknown task command "${sub ?? ''}". Try: list, get, subtasks, create, update, advance, status, note, check, link, unlink, delete`);
+    }
+  },
+
+  /** Task templates: a task's fields and its sub-tasks, saved under a name; pm task create --template uses one. */
+  async template([sub, ...rest], flags) {
+    const ref = (raw) => encodeURIComponent(String(need(raw, 'template (name or id)')).trim());
+    const none = (v) => (/^(none|null)$/i.test(String(v)) ? null : v);
+    const body = () => {
+      let b = {};
+      if (flags.file !== undefined) {
+        try {
+          b = JSON.parse(fs.readFileSync(flags.file, 'utf8'));
+        } catch (err) {
+          fail(`Could not read ${flags.file} as JSON (${err.message})`);
+        }
+      }
+      if (flags.name !== undefined) b.name = flags.name;
+      if (flags.title !== undefined) b.title = flags.title;
+      const desc = readDesc(flags);
+      if (desc !== undefined) b.description = desc;
+      for (const k of ['type', 'priority', 'epoch', 'estimate']) if (flags[k] !== undefined) b[k] = none(flags[k]);
+      if (flags.category !== undefined) b.categories = none(flags.category) === null ? [] : list(flags.category);
+      if (flags.check !== undefined) b.checklist = flags.check;
+      return b;
+    };
+    const line = (t) =>
+      console.log(`${t.id}  ${t.name}  ->  "${t.title}"${t.subtasks.length ? `  + ${plural(t.subtasks.length, 'sub-task', 'sub-tasks')}` : ''}`);
+    const facts = (t) =>
+      [t.type && `type=${t.type}`, t.priority && `priority=${t.priority}`, t.epoch && `epoch="${t.epoch}"`,
+        t.categories.length && `categories=${t.categories.join(',')}`, t.estimateMinutes != null && `estimate=${fmtMin(t.estimateMinutes)}`,
+        t.checklist.length && `checklist=${t.checklist.length}`].filter(Boolean).join(' ');
+    const detail = (t) => {
+      line(t);
+      if (facts(t)) console.log(`  ${facts(t)}`);
+      if (t.description) console.log(`\n${t.description}\n`);
+      if (t.checklist.length) {
+        console.log('Checklist:');
+        for (const c of t.checklist) console.log(`  [ ] ${c}`);
+      }
+      if (t.subtasks.length) {
+        console.log('Sub-tasks (an epoch of their own, or where the new task goes):');
+        for (const st of t.subtasks) console.log(`  ${st.title}${facts(st) ? `  ${facts(st)}` : ''}`);
+      }
+    };
+    switch (sub) {
+      case undefined:
+      case 'list':
+      case 'ls': {
+        const { templates } = await get('/api/v1/templates');
+        return out(flags, templates, () =>
+          templates.length ? templates.forEach(line) : console.log('No templates yet. Create one: pm template create --name Card --title "Card: {title}"'));
+      }
+      case 'get':
+      case 'show':
+        return out(flags, await get(`/api/v1/templates/${ref(rest.join(' '))}`), detail);
+      case 'create':
+      case 'new': {
+        const b = body();
+        b.name ??= rest.join(' ');
+        if (!b.name) fail('Provide --name "..."');
+        if (flags['from-task'] !== undefined) {
+          b.fromTask = await taskRef(flags['from-task']);
+          b.includeSubtasks = !!flags['with-subtasks'];
+        }
+        const t = await post('/api/v1/templates', b);
+        return out(flags, t, () => {
+          console.log(`Created template ${t.id}: ${t.name}`);
+          detail(t);
+        });
+      }
+      case 'update':
+      case 'edit': {
+        const b = body();
+        if (!Object.keys(b).length) fail('Nothing to change. Use --name, --title, --desc, --type, --priority, --category, --epoch, --estimate, --check or --file');
+        const t = await patch(`/api/v1/templates/${ref(rest[0])}`, b);
+        return out(flags, t, () => {
+          console.log(`Updated template ${t.id}: ${t.name}`);
+          detail(t);
+        });
+      }
+      case 'delete':
+      case 'rm': {
+        const t = await get(`/api/v1/templates/${ref(rest.join(' '))}`);
+        await del(`/api/v1/templates/${t.id}`);
+        return console.log(`Deleted the template ${t.name} (tasks made from it stay as they are)`);
+      }
+      default:
+        fail('Try: template list | show <name|id> | create --name X [--title ..] [--from-task APP-12 [--with-subtasks]] [--file t.json] | update <name|id> [..] | delete <name|id>');
     }
   },
 
@@ -1017,19 +1178,34 @@ Projects: pm project list | current | create --key APP --name "My app" [--color 
 
 Tasks (keys look like APP-12; a bare 12 means task 12 of the current project):
   pm task list [--status S] [--category C] [--type T] [--priority P] [--epoch E|none] [--folder F|inbox] [--created-by NAME] [--q text]
+               [--parent APP-3|none|any]           a task's sub-tasks | top-level tasks only | sub-tasks only
   pm task get APP-12
+  pm task subtasks APP-3                          its sub-tasks and how many are done
   pm task create --title "..." [--type Feature] [--category UI,Backend] [--epoch "Version 1.0"]
                  [--priority high] [--status open] [--desc "..." | --desc-file notes.md] [--estimate 2h]
-                 [--check "step one" --check "step two"] [--folder F]
-  pm task update APP-12 [same flags as create]    --epoch moves it into an epoch; --folder F|inbox takes it out
+                 [--check "step one" --check "step two"] [--folder F] [--parent APP-3]
+  pm task update APP-12 [same flags as create]    --epoch moves it into an epoch; --folder F|inbox takes it out;
+                                                  --parent APP-3 makes it a sub-task, --parent none makes it top-level
+  pm task update APP-12 APP-13 APP-14 --priority high   several tasks in one go (all or none); any flag but
+                                                  --title and --desc
   pm task advance APP-12 [--note "why"]           move to the next Kanban column
-  pm task status APP-12 "Alpha QA" [--note ".."]  set any status
+  pm task status APP-12 [APP-13 ...] "Alpha QA" [--note ".."]   set any status, on one task or several
   pm task note APP-12 "progress message"
   pm task check APP-12 "checklist item"           add checklist item
   pm item 34 [--undo] [--text ".."] [--remove]    tick / untick / reword / remove a checklist item (ids shown by task get)
   pm task link APP-12 [blocks | blocked by | duplicates | duplicated by | relates to] APP-9   (default: relates to)
   pm task unlink APP-12 APP-9                     one link per pair of tasks; links show in task get
-  pm task delete APP-12
+  pm task delete APP-12 [--with-subtasks]         without the flag its sub-tasks stay, as top-level tasks
+  pm task create --template Card --title "Fireball"   a task, and its sub-tasks, from a template; other flags
+                                                  replace the template's values ({title} becomes the title)
+
+Templates (per project; types, categories and epochs are kept by name):
+  pm template list | show <name|id> | delete <name|id>
+  pm template create --name Card [--title "Card: {title}"] [--type T] [--priority P] [--category A,B] [--epoch E]
+                     [--estimate 2h] [--desc ".." | --desc-file f] [--check "step" --check "step"]
+  pm template create --name Boss --from-task APP-12 [--with-subtasks] [--title "Boss: {title}"]
+  pm template create --name Card --file card.json   all fields and "subtasks": [{ "title": "VFX: {title}", "epoch": "VFX" }]
+  pm template update <name|id> [same flags; --file changes the fields it has; "subtasks" replaces the list]
 
 Epochs:   pm epoch list | get <id|name> | create --name X [--desc] [--color #hex] [--folder F] [--estimate 20h] [--target YYYY-MM-DD]
           pm epoch update <id|name> [same flags; --folder F|root moves it] | delete <id|name> [--delete-time]

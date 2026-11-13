@@ -8,6 +8,7 @@ import { buildApp } from '../server/app.ts';
 import { createUser } from '../server/auth.ts';
 import type { AppContext } from '../server/context.ts';
 import { createProject } from '../server/routes/projects.ts';
+import { COPY_LIMITS } from '../server/routes/copy.ts';
 
 let app: FastifyInstance;
 let ctx: AppContext;
@@ -47,8 +48,8 @@ before(async () => {
   );
   app = built.app;
   ctx = built.ctx;
-  const jay = createUser(ctx.db, 'jay', 'correct-horse');
-  createProject(ctx.db, jay, {
+  const alice = createUser(ctx.db, 'alice', 'correct-horse');
+  createProject(ctx.db, alice, {
     key: 'T',
     name: 'Test game',
     categories: [
@@ -71,16 +72,16 @@ test('rejects unauthenticated requests', async () => {
 });
 
 test('login: wrong password fails, correct password sets cookie', async () => {
-  const bad = await call('POST', '/api/auth/login', { username: 'jay', password: 'nope' }, 'none');
+  const bad = await call('POST', '/api/auth/login', { username: 'alice', password: 'nope' }, 'none');
   assert.equal(bad.status, 401);
-  const ok = await call('POST', '/api/auth/login', { username: 'JAY', password: 'correct-horse' }, 'none');
+  const ok = await call('POST', '/api/auth/login', { username: 'ALICE', password: 'correct-horse' }, 'none');
   assert.equal(ok.status, 200);
   const setCookie = ok.res.headers['set-cookie'];
   const raw = Array.isArray(setCookie) ? setCookie[0] : String(setCookie);
   cookie = raw.split(';')[0];
   assert.match(cookie, /^pm_session=/);
   const me = await call('GET', '/api/auth/me');
-  assert.equal(me.body.user.username, 'jay');
+  assert.equal(me.body.user.username, 'alice');
 });
 
 test('cookie writes without the CSRF header are refused', async () => {
@@ -675,7 +676,7 @@ test('review fixes: durations, unique actor names, epoch time, types, ids, timer
 
   // Token names are actors: they may not repeat or shadow a username.
   assert.equal((await call('POST', '/api/v1/tokens', { name: 'claude' })).status, 409);
-  assert.equal((await call('POST', '/api/v1/tokens', { name: 'JAY' })).status, 409);
+  assert.equal((await call('POST', '/api/v1/tokens', { name: 'ALICE' })).status, 409);
 
   // Deleting an epoch with time logged directly on it needs explicit confirmation.
   const ep = (await call('POST', '/api/v1/epochs', { name: 'Timed epoch' })).body;
@@ -826,6 +827,640 @@ test('a task can have several blockers and other links at once', async () => {
   // Each blocker clears independently.
   await call('POST', `/api/v1/tasks/${b1.id}/status`, { status: 'Alpha Complete' });
   assert.equal((await call('GET', `/api/v1/tasks/${target.id}`)).body.openBlockers, 1);
+});
+
+test('sub-tasks: own epochs, progress, filters, one level in one project, changing the parent', async () => {
+  const sprint = (await call('POST', '/api/v1/epochs', { name: 'Card Sprint' })).body;
+  const vfx = (await call('POST', '/api/v1/epochs', { name: 'VFX' })).body;
+  const parent = (await call('POST', '/api/v1/tasks', { title: 'Card Creation', epochId: sprint.id })).body;
+  assert.equal(parent.parent, null);
+  assert.deepEqual(parent.subtasks, { done: 0, total: 0 });
+  assert.deepEqual(parent.children, []);
+
+  // By key with a token, in an epoch of its own; by id; and an existing task moved under it.
+  const fx = await call('POST', '/api/v1/tasks', { title: 'Card VFX', parent: parent.key, epochId: vfx.id }, 'token');
+  assert.equal(fx.status, 201, JSON.stringify(fx.body));
+  assert.deepEqual(fx.body.parent, { id: parent.id, key: parent.key, title: 'Card Creation' });
+  assert.equal(fx.body.epochId, vfx.id);
+  assert.ok(fx.body.activity.some((a: Json) => a.message === `Created in Open as a sub-task of ${parent.key}`));
+  const sfx = (await call('POST', '/api/v1/tasks', { title: 'Card SFX', parent: parent.id })).body;
+  const art = (await call('POST', '/api/v1/tasks', { title: 'Card art' })).body;
+  const made = await call('PATCH', `/api/v1/tasks/${art.key}`, { parent: parent.key });
+  assert.equal(made.status, 200);
+  assert.equal(made.body.parentId, parent.id);
+  assert.ok(made.body.activity.some((a: Json) => a.message === `made a sub-task of ${parent.key}`));
+
+  // Progress counts Alpha Complete and later as done; the parent lists its sub-tasks in the order they were made.
+  await call('POST', `/api/v1/tasks/${fx.body.id}/status`, { status: 'Alpha Complete' });
+  await call('POST', `/api/v1/tasks/${sfx.id}/status`, { status: 'Alpha QA' });
+  const detail = (await call('GET', `/api/v1/tasks/${parent.key}`)).body;
+  assert.deepEqual(detail.subtasks, { done: 1, total: 3 });
+  assert.deepEqual(detail.children.map((c: Json) => c.key), [fx.body.key, sfx.key, art.key]);
+  assert.equal(detail.children[1].statusLabel, 'Alpha QA');
+  assert.equal(detail.children[0].description, undefined);
+  assert.equal(detail.epochId, sprint.id);
+  assert.ok(detail.activity.some((a: Json) => a.kind === 'subtask' && a.message === `Added sub-task ${art.key} "Card art"`));
+
+  // Filters: a parent's sub-tasks, top-level tasks only, sub-tasks only.
+  const ids = async (q: string) => (await call('GET', `/api/v1/tasks?${q}`)).body.tasks.map((t: Json) => t.id) as number[];
+  assert.deepEqual((await ids(`parent=${parent.key}`)).sort(), [fx.body.id, sfx.id, art.id].sort());
+  const top = await ids('parent=none');
+  assert.ok(top.includes(parent.id) && !top.includes(sfx.id));
+  const subs = await ids('parent=any');
+  assert.ok(subs.includes(sfx.id) && !subs.includes(parent.id));
+  assert.equal((await call('GET', '/api/v1/tasks?parent=T-99999')).status, 404);
+
+  // One level only, never itself; unknown parents are 404.
+  const deep = await call('POST', '/api/v1/tasks', { title: 'Too deep', parent: fx.body.key });
+  assert.equal(deep.status, 400);
+  assert.match(deep.body.error, /can't have sub-tasks of their own/);
+  const other = (await call('POST', '/api/v1/tasks', { title: 'Other parent' })).body;
+  const busy = await call('PATCH', `/api/v1/tasks/${parent.id}`, { parent: other.key });
+  assert.equal(busy.status, 400);
+  assert.match(busy.body.error, /has sub-tasks of its own/);
+  assert.equal((await call('PATCH', `/api/v1/tasks/${other.id}`, { parent: other.id })).status, 400);
+  assert.equal((await call('POST', '/api/v1/tasks', { title: 'x', parent: 'T-99999' })).status, 404);
+  // A parentId in the body is not how the API takes a parent: it is ignored.
+  const plain = (await call('POST', '/api/v1/tasks', { title: 'Plain', parentId: parent.id })).body;
+  assert.equal(plain.parentId, null);
+
+  // Moving to another parent and detaching leave notes on both parents.
+  const moved = await call('PATCH', `/api/v1/tasks/${art.id}`, { parent: other.id, title: 'Card art v2' });
+  assert.ok(moved.body.activity.some((a: Json) => a.message.includes(`moved from ${parent.key} to ${other.key}`)));
+  const was = (await call('GET', `/api/v1/tasks/${parent.id}`)).body;
+  assert.ok(was.activity.some((a: Json) => a.message === `Removed sub-task ${art.key} "Card art v2"`));
+  assert.equal(was.subtasks.total, 2);
+  const freed = await call('PATCH', `/api/v1/tasks/${art.id}`, { parent: 'none' });
+  assert.equal(freed.body.parentId, null);
+  assert.ok(freed.body.activity.some((a: Json) => a.message === `detached from ${other.key}`));
+  assert.equal((await call('PATCH', `/api/v1/tasks/${art.id}`, { parent: null })).status, 200);
+
+  // A task in another of your projects can't be a parent.
+  const side = (await call('POST', '/api/v1/projects', { key: 'SIDE', name: 'Side project' })).body;
+  const sideTask = (await call('POST', '/api/v1/tasks?project=SIDE', { title: 'Elsewhere' })).body;
+  const cross = await call('PATCH', `/api/v1/tasks/${art.id}`, { parent: sideTask.key });
+  assert.equal(cross.status, 400);
+  assert.match(cross.body.error, /same project/);
+  assert.equal((await call('DELETE', `/api/v1/projects/${side.id}?confirm=SIDE`)).status, 200);
+});
+
+test('sub-tasks: deleting a parent keeps its sub-tasks unless asked, and leaves notes on what stays', async () => {
+  const mk = async (title: string, parent?: string) => (await call('POST', '/api/v1/tasks', { title, parent })).body;
+  const boss = await mk('Boss fight');
+  const [bArt, bAi] = [await mk('Boss art', boss.key), await mk('Boss AI', boss.key)];
+  // Deleting a sub-task on its own: the parent gets a note and one fewer sub-task.
+  await call('DELETE', `/api/v1/tasks/${bAi.key}`);
+  const after = (await call('GET', `/api/v1/tasks/${boss.id}`)).body;
+  assert.equal(after.subtasks.total, 1);
+  assert.ok(after.activity.some((a: Json) => a.message === `Removed sub-task: ${bAi.key} "Boss AI" was deleted`));
+  // By default the sub-tasks stay, as top-level tasks.
+  const del = await call('DELETE', `/api/v1/tasks/${boss.key}`);
+  assert.deepEqual(del.body, { ok: true, deleted: 1 });
+  const orphan = (await call('GET', `/api/v1/tasks/${bArt.id}`)).body;
+  assert.equal(orphan.parentId, null);
+  assert.ok(orphan.activity.some((a: Json) => a.message === `Parent ${boss.key} "Boss fight" was deleted, so this is now a top-level task`));
+
+  // ?withSubtasks=true deletes them too; links to tasks outside get a note, links inside the set don't matter.
+  const level = await mk('Level 3');
+  const [lArt, lMusic] = [await mk('Level art', level.key), await mk('Level music', level.key)];
+  const outside = await mk('Audio pass');
+  await call('POST', `/api/v1/tasks/${lMusic.id}/links`, { task: outside.id, kind: 'blocks' });
+  await call('POST', `/api/v1/tasks/${lArt.id}/links`, { task: lMusic.id });
+  const all = await call('DELETE', `/api/v1/tasks/${level.key}?withSubtasks=true`);
+  assert.deepEqual(all.body, { ok: true, deleted: 3 });
+  for (const t of [level, lArt, lMusic]) assert.equal((await call('GET', `/api/v1/tasks/${t.id}`)).status, 404);
+  const o = (await call('GET', `/api/v1/tasks/${outside.id}`)).body;
+  assert.equal(o.openBlockers, 0);
+  assert.ok(o.activity.some((a: Json) => a.message === `Removed link: ${lMusic.key} "Level music" was deleted`));
+});
+
+test('templates: save fields or a task, unique names, limits, changes and deletes', async () => {
+  const card = await call(
+    'POST',
+    '/api/v1/templates',
+    {
+      name: 'Card',
+      title: 'Card: {title}',
+      description: 'Make the {title} card.',
+      type: 'Feature',
+      priority: 'High',
+      categories: ['Combat', ' Combat ', ''],
+      estimate: '1h30m',
+      checklist: ['Stats for {title}', ' ', 'Playtest'],
+      subtasks: [
+        { title: 'Art: {title}', epoch: 'Template art', estimate: '2h' },
+        { title: 'SFX: {title}', type: 'Polish', categories: ['Missing'] },
+      ],
+    },
+    'token',
+  );
+  assert.equal(card.status, 201, JSON.stringify(card.body));
+  assert.equal(card.body.name, 'Card');
+  assert.equal(card.body.priority, 'high');
+  assert.deepEqual(card.body.categories, ['Combat']);
+  assert.equal(card.body.estimateMinutes, 90);
+  assert.deepEqual(card.body.checklist, ['Stats for {title}', 'Playtest']);
+  assert.deepEqual(card.body.subtasks.map((s: Json) => [s.title, s.epoch, s.estimateMinutes]), [
+    ['Art: {title}', 'Template art', 120],
+    ['SFX: {title}', null, null],
+  ]);
+  assert.equal(card.body.createdBy, 'claude');
+
+  // Names are unique per project (ignoring case) and need a letter; values are checked.
+  assert.equal((await call('POST', '/api/v1/templates', { name: 'card' })).status, 409);
+  assert.equal((await call('POST', '/api/v1/templates', { name: '42' })).status, 400, 'a bare number means a template id');
+  assert.equal((await call('POST', '/api/v1/templates', { name: 'Bad', priority: 'urgent' })).status, 400);
+  assert.equal((await call('POST', '/api/v1/templates', { name: 'Bad', subtasks: [{ epoch: 'x' }] })).status, 400, 'sub-tasks need a title');
+  const many = Array.from({ length: 51 }, (_, i) => ({ title: `Step ${i}` }));
+  assert.equal((await call('POST', '/api/v1/templates', { name: 'Bad', subtasks: many })).status, 400);
+  const huge = await call('POST', '/api/v1/templates', {
+    name: 'Bad',
+    description: 'x'.repeat(90_000),
+    subtasks: [{ title: 'a', description: 'y'.repeat(90_000) }, { title: 'b', description: 'z'.repeat(90_000) }],
+  });
+  assert.equal(huge.status, 400);
+  assert.match(huge.body.error, /too big/);
+
+  // Found by id or by name, in any case.
+  assert.deepEqual((await call('GET', '/api/v1/templates')).body.templates.map((t: Json) => t.name), ['Card']);
+  assert.equal((await call('GET', `/api/v1/templates/${card.body.id}`)).body.name, 'Card');
+  assert.equal((await call('GET', '/api/v1/templates/CARD')).body.id, card.body.id);
+  assert.equal((await call('GET', '/api/v1/templates/Nope')).status, 404);
+
+  // Saving a task: its fields and, when asked, its sub-tasks. Fields sent along override what it copies.
+  const art = (await call('POST', '/api/v1/epochs', { name: 'Template art' })).body;
+  const boss = (await call('POST', '/api/v1/tasks', { title: 'Boss: Golem', estimate: '3h', checklist: ['Design', 'Build'], epochId: art.id })).body;
+  await call('PATCH', `/api/v1/checklist/${boss.checklistItems[0].id}`, { done: true });
+  await call('POST', '/api/v1/tasks', { title: 'Golem art', parent: boss.key, categories: ['Trinket'] });
+  const snap = await call('POST', '/api/v1/templates', { name: 'Boss', fromTask: boss.key, includeSubtasks: true, title: 'Boss: {title}' });
+  assert.equal(snap.status, 201, JSON.stringify(snap.body));
+  assert.equal(snap.body.title, 'Boss: {title}');
+  assert.equal(snap.body.epoch, 'Template art');
+  assert.equal(snap.body.estimateMinutes, 180);
+  assert.deepEqual(snap.body.checklist, ['Design', 'Build']);
+  assert.deepEqual(snap.body.subtasks.map((s: Json) => [s.title, s.categories]), [['Golem art', ['Trinket']]]);
+  const flat = (await call('POST', '/api/v1/templates', { name: 'Boss only', fromTask: boss.id })).body;
+  assert.equal(flat.title, 'Boss: Golem');
+  assert.deepEqual(flat.subtasks, []);
+  assert.equal((await call('POST', '/api/v1/templates', { name: 'Ghost', fromTask: 'T-99999' })).status, 404);
+  // A saved task keeps to the same limits as fields sent one by one.
+  const long = (await call('POST', '/api/v1/tasks', { title: 'Long list', checklist: Array.from({ length: 101 }, (_, i) => `Step ${i}`) })).body;
+  const tooLong = await call('POST', '/api/v1/templates', { name: 'Long', fromTask: long.key });
+  assert.equal(tooLong.status, 400);
+  assert.match(tooLong.body.error, /101 checklist items/);
+  assert.equal((await call('DELETE', `/api/v1/tasks/${long.key}`)).status, 200);
+
+  // Changing: fields not sent stay; sub-tasks, when sent, replace the list; renaming checks for clashes.
+  const changed = await call('PATCH', '/api/v1/templates/Boss only', { name: 'Golem', priority: null, subtasks: [{ title: 'Rig' }] });
+  assert.equal(changed.status, 200, JSON.stringify(changed.body));
+  assert.equal(changed.body.name, 'Golem');
+  assert.equal(changed.body.priority, null);
+  assert.equal(changed.body.title, 'Boss: Golem');
+  assert.deepEqual(changed.body.subtasks.map((s: Json) => s.title), ['Rig']);
+  assert.equal((await call('PATCH', '/api/v1/templates/Golem', { name: 'BOSS' })).status, 409);
+  assert.equal((await call('PATCH', '/api/v1/templates/Golem', { name: 'golem' })).status, 200, 'a new case of its own name is fine');
+  // SQLite's NOCASE folds only A-Z, so "Äpfel" and "äpfel" are two names: renaming one to the other is a clash.
+  const upper = await call('POST', '/api/v1/templates', { name: 'Äpfel' });
+  const lower = await call('POST', '/api/v1/templates', { name: 'äpfel' });
+  assert.deepEqual([upper.status, lower.status], [201, 201]);
+  assert.equal((await call('PATCH', `/api/v1/templates/${upper.body.id}`, { name: 'äpfel' })).status, 409);
+  for (const t of [upper, lower]) assert.equal((await call('DELETE', `/api/v1/templates/${t.body.id}`)).status, 200);
+  assert.equal((await call('PATCH', '/api/v1/templates/Golem', { fromTask: boss.key })).status, 400);
+  assert.equal((await call('DELETE', '/api/v1/templates/Golem')).status, 200);
+  assert.equal((await call('GET', '/api/v1/templates/Golem')).status, 404);
+});
+
+test('templates: tasks made from one fill in {title}, take overrides, place sub-tasks and warn about missing names', async () => {
+  const art = (await call('GET', '/api/v1/epochs')).body.epochs.find((e: Json) => e.name === 'Template art');
+  const made = await call('POST', '/api/v1/tasks', { template: 'Card', title: 'Fireball' }, 'token');
+  assert.equal(made.status, 201, JSON.stringify(made.body));
+  const t = made.body;
+  assert.equal(t.title, 'Card: Fireball');
+  assert.equal(t.description, 'Make the Fireball card.');
+  assert.equal(t.type, 'Feature');
+  assert.equal(t.priority, 'high');
+  assert.equal(t.estimateMinutes, 90);
+  assert.deepEqual(t.categories.map((c: Json) => c.name), ['Combat']);
+  assert.deepEqual(t.checklistItems.map((c: Json) => [c.text, c.done]), [['Stats for Fireball', false], ['Playtest', false]]);
+  assert.equal(t.epochId, null);
+  assert.deepEqual(t.subtasks, { done: 0, total: 2 });
+  assert.deepEqual(t.children.map((c: Json) => c.title), ['Art: Fireball', 'SFX: Fireball']);
+  assert.equal(t.children[0].epochId, art.id, 'a sub-task goes to the epoch its template names');
+  assert.equal(t.children[0].estimateMinutes, 120);
+  assert.equal(t.children[1].type, 'Feature', 'an unknown type falls back to the default');
+  assert.deepEqual(t.children[1].categories, []);
+  assert.equal(t.warnings.length, 2, JSON.stringify(t.warnings));
+  assert.match(t.warnings[0], /^Sub-task "SFX: Fireball": there is no type "Polish"/);
+  assert.match(t.warnings[1], /left out the category "Missing"/);
+  assert.equal(t.activity.at(-1).message, 'Created in Open from the template "Card" with 2 sub-tasks');
+  assert.ok(!t.activity.some((a: Json) => a.kind === 'subtask'), 'one entry on the parent, not one per sub-task');
+  const sub = (await call('GET', `/api/v1/tasks/${t.children[0].id}`)).body;
+  assert.equal(sub.activity.at(-1).message, `Created in Open from the template "Card" as a sub-task of ${t.key}`);
+  assert.equal(sub.createdBy, 'claude');
+
+  // Fields in the request win; sub-tasks still start in the first status, where the parent is unless named.
+  const sprint = (await call('POST', '/api/v1/epochs', { name: 'Template sprint' })).body;
+  const over = await call('POST', '/api/v1/tasks', {
+    template: (await call('GET', '/api/v1/templates/Card')).body.id,
+    title: 'Ice wall',
+    priority: 'low',
+    categories: [],
+    checklist: ['Only this'],
+    epochId: sprint.id,
+    estimate: null,
+    status: 'In Progress',
+    description: 'Mine',
+  });
+  assert.equal(over.status, 201, JSON.stringify(over.body));
+  assert.equal(over.body.title, 'Card: Ice wall');
+  assert.equal(over.body.priority, 'low');
+  assert.deepEqual(over.body.categories, []);
+  assert.deepEqual(over.body.checklistItems.map((c: Json) => c.text), ['Only this']);
+  assert.equal(over.body.epochId, sprint.id);
+  assert.equal(over.body.estimateMinutes, null);
+  assert.equal(over.body.status, 'in_progress');
+  assert.equal(over.body.description, 'Mine');
+  assert.deepEqual(over.body.children.map((c: Json) => [c.status, c.epochId]), [['open', art.id], ['open', sprint.id]]);
+  const dollar = (await call('POST', '/api/v1/tasks', { template: 'Card', title: 'Costs $& and $1' })).body;
+  assert.equal(dollar.title, 'Card: Costs $& and $1');
+
+  // A title is needed when the template's has {title}; otherwise a title sent replaces it.
+  const untitled = await call('POST', '/api/v1/tasks', { template: 'Card' });
+  assert.equal(untitled.status, 400);
+  assert.match(untitled.body.error, /needs a title/);
+  assert.equal((await call('POST', '/api/v1/tasks', {})).status, 400, 'still needed without a template');
+  const boss = (await call('POST', '/api/v1/tasks', { template: 'Boss', title: 'Hydra' })).body;
+  assert.equal(boss.title, 'Boss: Hydra');
+  assert.equal(boss.epochId, art.id, "the template's own epoch, found by name");
+  assert.deepEqual(boss.checklistItems.map((c: Json) => c.done), [false, false]);
+  await call('POST', '/api/v1/templates', { name: 'Fixed', title: 'Weekly build' });
+  assert.equal((await call('POST', '/api/v1/tasks', { template: 'Fixed' })).body.title, 'Weekly build');
+  assert.equal((await call('POST', '/api/v1/tasks', { template: 'fixed', title: 'Hotfix build' })).body.title, 'Hotfix build');
+
+  // Epoch names that are missing or shared are reported; a template with sub-tasks can't make a sub-task.
+  await call('POST', '/api/v1/templates', { name: 'Lost', epoch: 'Gone' });
+  const lost = (await call('POST', '/api/v1/tasks', { template: 'Lost', title: 'Where' })).body;
+  assert.equal(lost.epochId, null);
+  assert.match(lost.warnings[0], /no epoch named "Gone" in this project, so it went to the Inbox/);
+  const dup1 = (await call('POST', '/api/v1/epochs', { name: 'Twin' })).body;
+  await call('POST', '/api/v1/epochs', { name: 'twin' });
+  await call('POST', '/api/v1/templates', { name: 'Twins', epoch: 'TWIN' });
+  const twin = (await call('POST', '/api/v1/tasks', { template: 'Twins', title: 'Which' })).body;
+  assert.equal(twin.epochId, dup1.id);
+  assert.match(twin.warnings[0], /several epochs are named "TWIN"; it went to the first one/);
+  const asSub = await call('POST', '/api/v1/tasks', { template: 'Card', title: 'Nested', parent: t.key });
+  assert.equal(asSub.status, 400);
+  assert.match(asSub.body.error, /has sub-tasks/);
+  const leaf = await call('POST', '/api/v1/tasks', { template: 'Lost', title: 'Leaf', parent: t.key });
+  assert.equal(leaf.status, 201);
+  assert.equal(leaf.body.parentId, t.id);
+  assert.equal((await call('POST', '/api/v1/tasks', { template: 'Nope', title: 'x' })).status, 404);
+
+  // New projects copying this one get its templates; names are looked up again there.
+  const tId = (await call('GET', '/api/v1/projects')).body.projects.find((p: Json) => p.key === 'T').id;
+  const copy = (await call('POST', '/api/v1/projects', { key: 'TPL', name: 'Copied', copyFrom: tId })).body;
+  const copied = (await call('GET', '/api/v1/templates?project=TPL')).body.templates;
+  assert.deepEqual(copied.map((x: Json) => x.name), ['Boss', 'Card', 'Fixed', 'Lost', 'Twins']);
+  const there = (await call('POST', '/api/v1/tasks?project=TPL', { template: 'Card', title: 'Elsewhere' })).body;
+  assert.equal(there.key, 'TPL-1');
+  assert.ok(there.warnings.some((w: string) => /no epoch named "Template art"/.test(w)));
+  assert.equal((await call('DELETE', `/api/v1/projects/${copy.id}?confirm=TPL`)).status, 200);
+});
+
+test('bulk: update, move, categories and delete several tasks at once, all or nothing', async () => {
+  const bulk = (body: unknown, auth: 'session' | 'token' = 'session') => call('POST', '/api/v1/tasks/bulk', body, auth);
+  const mk = async (title: string, extra: Json = {}) => (await call('POST', '/api/v1/tasks', { title, ...extra })).body;
+  const get = async (id: number) => (await call('GET', `/api/v1/tasks/${id}`)).body;
+  const order = async (status: string) =>
+    (await call('GET', `/api/v1/tasks?status=${status}`)).body.tasks.map((t: Json) => t.title).filter((t: string) => t.startsWith('Bulk '));
+  const epoch = (await call('POST', '/api/v1/epochs', { name: 'Bulk epoch' })).body;
+  const a = await mk('Bulk A', { categories: ['Trinket'] });
+  const b = await mk('Bulk B');
+  const c = await mk('Bulk C', { status: 'In Progress' });
+
+  // Keys and ids mix, a task named twice counts once, and each task gets its own activity entry.
+  const up = await bulk({ action: 'update', ids: [a.key, b.id, c.id, a.id], set: { priority: 'high', epochId: epoch.id, estimate: '2h' } }, 'token');
+  assert.equal(up.status, 200, JSON.stringify(up.body));
+  assert.deepEqual(up.body.tasks.map((t: Json) => t.key), [a.key, b.key, c.key]);
+  for (const t of up.body.tasks) assert.deepEqual([t.priority, t.epochId, t.estimateMinutes], ['high', epoch.id, 120]);
+  for (const t of [a, b, c]) {
+    const last = (await get(t.id)).activity[0];
+    assert.equal(last.actor, 'claude');
+    assert.equal(last.message, 'priority medium → high; estimate 120m; moved to epoch "Bulk epoch"');
+  }
+  // A status sent this way goes to the end of the column, with the note on each task.
+  const st = await bulk({ action: 'update', ids: [a.id, b.id], set: { status: 'Alpha QA', note: 'Batch done' } });
+  assert.equal(st.status, 200);
+  assert.equal((await get(b.id)).activity[0].message, 'Open → Alpha QA: Batch done');
+
+  // All or nothing: the second task can't become a sub-task, so the first one doesn't either.
+  const parent = await mk('Bulk parent');
+  const kid = await mk('Bulk kid', { parent: parent.key });
+  const bad = await bulk({ action: 'update', ids: [a.id, parent.id], set: { parent: b.key } });
+  assert.equal(bad.status, 400);
+  assert.match(bad.body.error, /has sub-tasks of its own/);
+  assert.equal((await get(a.id)).parentId, null, 'the first change was rolled back');
+  // A task that doesn't exist fails the request before anything changes.
+  assert.equal((await bulk({ action: 'update', ids: [a.id, 999999], set: { priority: 'low' } })).status, 404);
+  assert.equal((await get(a.id)).priority, 'high');
+
+  // Sub-tasks of one parent, then top-level again.
+  const sub = await bulk({ action: 'update', ids: [a.key, b.key], set: { parent: c.key } });
+  assert.deepEqual(sub.body.tasks.map((t: Json) => t.parentId), [c.id, c.id]);
+  assert.deepEqual((await get(c.id)).subtasks, { total: 2, done: 0 });
+  const top = await bulk({ action: 'update', ids: [a.key, b.key], set: { parent: null } });
+  assert.deepEqual(top.body.tasks.map((t: Json) => t.parentId), [null, null]);
+
+  // A task's own fields, an empty change, an unknown action and too many or no tasks are refused.
+  const own = await bulk({ action: 'update', ids: [a.id], set: { title: 'Same for all', priority: 'low' } });
+  assert.equal(own.status, 400);
+  assert.match(own.body.error, /^title can't be changed on several tasks at once/);
+  assert.equal((await bulk({ action: 'update', ids: [a.id], set: {} })).status, 400);
+  assert.equal((await bulk({ action: 'update', ids: [a.id] })).status, 400);
+  assert.equal((await bulk({ action: 'archive', ids: [a.id] })).status, 400);
+  assert.equal((await bulk({ action: 'update', ids: [], set: { priority: 'low' } })).status, 400);
+  assert.equal((await bulk({ action: 'delete', ids: Array.from({ length: 501 }, (_, i) => 900000 + i) })).status, 400);
+  assert.equal((await get(a.id)).priority, 'high');
+
+  // Move: in the order given, together, before another task or at the end of a column.
+  const d = await mk('Bulk D', { status: 'Alpha QA' });
+  assert.deepEqual(await order('alpha_qa'), ['Bulk A', 'Bulk B', 'Bulk D']);
+  const mv = await bulk({ action: 'move', ids: [d.id, c.key, a.id], status: 'alpha_qa', beforeId: b.id }, 'token');
+  assert.equal(mv.status, 200);
+  assert.deepEqual(await order('alpha_qa'), ['Bulk D', 'Bulk C', 'Bulk A', 'Bulk B']);
+  assert.equal((await get(c.id)).activity[0].message, 'In Progress → Alpha QA');
+  assert.equal((await bulk({ action: 'move', ids: [b.id, d.id], status: 'Beta QA' })).status, 200);
+  assert.deepEqual(await order('beta_qa'), ['Bulk B', 'Bulk D']);
+  assert.deepEqual(await order('alpha_qa'), ['Bulk C', 'Bulk A']);
+  assert.equal((await bulk({ action: 'move', ids: [a.id, b.id], status: 'beta_qa', beforeId: b.id })).status, 400);
+  assert.equal((await bulk({ action: 'move', ids: [a.id] })).status, 400);
+  assert.equal((await bulk({ action: 'move', ids: [a.id], status: 'Nowhere' })).status, 400);
+
+  // Categories: added to and removed from tasks that each have their own.
+  const cats = await bulk({ action: 'categories', ids: [a.id, b.id], add: ['Combat'], remove: ['trinket'] });
+  assert.equal(cats.status, 200);
+  assert.deepEqual(cats.body.tasks.map((t: Json) => t.categories.map((x: Json) => x.name)), [['Combat'], ['Combat']]);
+  assert.match((await get(a.id)).activity[0].message, /^categories: Combat$/);
+  assert.equal((await bulk({ action: 'categories', ids: [a.id], add: ['Nope'] })).status, 400);
+  assert.equal((await bulk({ action: 'categories', ids: [a.id] })).status, 400);
+
+  // Tasks from two projects are refused.
+  const other = (await call('POST', '/api/v1/projects', { key: 'BLK', name: 'Bulk other' })).body;
+  const there = (await call('POST', '/api/v1/tasks?project=BLK', { title: 'Elsewhere' })).body;
+  const mixed = await bulk({ action: 'update', ids: [a.id, there.key], set: { priority: 'low' } });
+  assert.equal(mixed.status, 400);
+  assert.match(mixed.body.error, /one project/);
+  assert.equal((await call('DELETE', `/api/v1/projects/${other.id}?confirm=BLK`)).status, 200);
+  assert.equal((await get(a.id)).priority, 'high');
+
+  // One live event for the whole request, in the tasks' project.
+  const seen: Array<{ kind: string; projectId?: number }> = [];
+  const off = ctx.bus.subscribe((e) => seen.push(e));
+  await bulk({ action: 'update', ids: [c.id, d.id], set: { priority: 'low' } });
+  off();
+  assert.deepEqual(seen.map((e) => [e.kind, e.projectId]), [['tasks', c.projectId]]);
+
+  // Delete: sub-tasks stay (as top-level tasks) unless asked; with withSubtasks they go too.
+  const p2 = await mk('Bulk P2');
+  const k2 = await mk('Bulk K2', { parent: p2.key });
+  const del = await bulk({ action: 'delete', ids: [parent.id, a.id] });
+  assert.deepEqual(del.body, { ok: true, deleted: 2 });
+  assert.equal((await get(kid.id)).parentId, null);
+  const delAll = await bulk({ action: 'delete', ids: [p2.key, b.key], withSubtasks: true }, 'token');
+  assert.deepEqual(delAll.body, { ok: true, deleted: 3 });
+  assert.equal((await call('GET', `/api/v1/tasks/${k2.id}`)).status, 404);
+  // A task already gone fails the whole request.
+  assert.equal((await bulk({ action: 'delete', ids: [c.id, a.id] })).status, 404);
+  assert.equal((await call('GET', `/api/v1/tasks/${c.id}`)).status, 200);
+  assert.deepEqual((await bulk({ action: 'delete', ids: [c.id, d.id, kid.id] })).body, { ok: true, deleted: 3 });
+  await call('DELETE', `/api/v1/epochs/${epoch.id}`);
+});
+
+test('copy: a folder with everything in it, epochs, tasks with their sub-tasks and files; all or nothing', async () => {
+  const copy = (body: unknown, auth: 'session' | 'token' = 'session') => call('POST', '/api/v1/copy', body, auth);
+  const mk = async (title: string, extra: Json = {}) => (await call('POST', '/api/v1/tasks', { title, ...extra })).body;
+  const get = async (id: number) => (await call('GET', `/api/v1/tasks/${id}`)).body;
+  const tree = async () => (await call('GET', '/api/v1/tree')).body;
+  const content = async (id: number) => (await app.inject({ method: 'GET', url: `/api/v1/files/${id}/content`, headers: { cookie } })).body;
+  const blobs = () => fs.readdirSync(ctx.filesDir).length;
+  const upload = async (folderId: number, filename: string, data: string, type: string) => {
+    const b = '----copy';
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/files',
+      headers: { cookie, 'x-pm-client': 'web', 'content-type': `multipart/form-data; boundary=${b}` },
+      payload:
+        `--${b}\r\nContent-Disposition: form-data; name="folderId"\r\n\r\n${folderId}\r\n` +
+        `--${b}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: ${type}\r\n\r\n${data}\r\n--${b}--\r\n`,
+    });
+    assert.equal(res.statusCode, 201, res.body);
+    return JSON.parse(res.body).files[0] as Json;
+  };
+
+  // Src/      "Card" with two sub-tasks: "Card text" here, "Card VFX" in an epoch outside Src; the epoch "Src epoch"
+  // Src/Art/  the epoch "Sprites" with "Draw hero"; "Loose art"; "Orphan", a sub-task of a task outside Src;
+  //           hero.png, and notes.md, which shows hero.png and links to a file outside Src
+  const src = (await call('POST', '/api/v1/folders', { name: 'Src' })).body;
+  const art = (await call('POST', '/api/v1/folders', { name: 'Art', parentId: src.id })).body;
+  const outside = (await call('POST', '/api/v1/folders', { name: 'Outside' })).body;
+  const readme = await upload(outside.id, 'readme.txt', 'outside', 'text/plain');
+  const hero = await upload(art.id, 'hero.png', 'PNGDATA', 'image/png');
+  const notesText = `![hero](/api/v1/files/${hero.id}/content)\n[readme](/api/v1/files/${readme.id}/content)`;
+  const notes = (await call('POST', '/api/v1/docs', { name: 'notes', folderId: art.id, content: notesText })).body;
+  const vfx = (await call('POST', '/api/v1/epochs', { name: 'Outside VFX' })).body;
+  await call('POST', '/api/v1/epochs', { name: 'Src epoch', folderId: src.id, description: `Hero: /api/v1/files/${hero.id}/content` });
+  const sprites = (await call('POST', '/api/v1/epochs', { name: 'Sprites', folderId: art.id, color: '#123456' })).body;
+  const draw = await mk('Draw hero', {
+    epochId: sprites.id, status: 'In Progress', priority: 'high', estimate: '2h', categories: ['Combat'],
+    checklist: ['sketch', 'ink'], description: `Use /api/v1/files/${hero.id}/content`,
+  });
+  await call('PATCH', `/api/v1/checklist/${draw.checklistItems[0].id}`, { done: true });
+  const loose = await mk('Loose art', { folderId: art.id });
+  const outer = await mk('Outer parent');
+  await mk('Orphan', { folderId: art.id, parent: outer.key });
+  const card = await mk('Card', { folderId: src.id });
+  const cardText = await mk('Card text', { folderId: src.id, parent: card.key });
+  const cardVfx = await mk('Card VFX', { epochId: vfx.id, parent: card.key });
+
+  // A dry run only counts.
+  const start = { tree: await tree(), blobs: blobs() };
+  const bytes = start.tree.files.filter((f: Json) => f.id === hero.id || f.id === notes.id).reduce((n: number, f: Json) => n + f.size, 0);
+  const dry = await copy({ item: { kind: 'folder', id: src.id }, to: { folderId: null }, dryRun: true });
+  // "Card VFX" lives outside Src: its copy goes to its own epoch, which the count says.
+  assert.deepEqual(dry.body, { ok: true, dryRun: true, folders: 2, epochs: 2, tasks: 6, files: 2, bytes, subtasksElsewhere: 1 });
+  assert.deepEqual(await tree(), start.tree);
+  assert.equal(blobs(), start.blobs);
+
+  // The copy: one live event per kind of thing made, in the project.
+  const seen: Array<{ kind: string; projectId?: number }> = [];
+  const off = ctx.bus.subscribe((e) => seen.push(e));
+  const res = await copy({ item: { kind: 'folder', id: src.id }, to: { folderId: null } }, 'token');
+  off();
+  assert.equal(res.status, 201, JSON.stringify(res.body));
+  assert.deepEqual([res.body.folders, res.body.epochs, res.body.tasks, res.body.files], [2, 2, 6, 2]);
+  assert.deepEqual([res.body.item.kind, res.body.item.name], ['folder', 'Src (copy)'], '"Src" is taken at the top level');
+  assert.deepEqual(seen.map((e) => e.kind).sort(), ['epochs', 'files', 'folders', 'tasks']);
+  assert.ok(seen.every((e) => e.projectId === card.projectId));
+
+  const t = await tree();
+  const newSrc = res.body.item.id;
+  const newArt = t.folders.find((f: Json) => f.parentId === newSrc);
+  assert.equal(newArt.name, 'Art', 'only the item copied is renamed');
+  const epochsIn = (folderId: number) => t.epochs.filter((e: Json) => e.folderId === folderId);
+  assert.deepEqual(epochsIn(newSrc).map((e: Json) => e.name), ['Src epoch']);
+  const newSprites = epochsIn(newArt.id)[0];
+  assert.deepEqual([newSprites.name, newSprites.color], ['Sprites', '#123456']);
+  const newHero = t.files.find((f: Json) => f.folderId === newArt.id && f.name === 'hero.png');
+  const newNotes = t.files.find((f: Json) => f.folderId === newArt.id && f.name === 'notes.md');
+
+  // Copied tasks: new keys, first status, checklists unticked, the same fields; the originals are untouched.
+  const fresh = new Map<string, Json>(t.tasks.filter((x: Json) => x.id > cardVfx.id).map((x: Json) => [x.title, x]));
+  assert.deepEqual([...fresh.keys()].sort(), ['Card', 'Card VFX', 'Card text', 'Draw hero', 'Loose art', 'Orphan']);
+  const d = await get(fresh.get('Draw hero')!.id);
+  assert.deepEqual([d.epochId, d.status, d.priority, d.estimateMinutes], [newSprites.id, 'open', 'high', 120]);
+  assert.deepEqual(d.checklistItems.map((i: Json) => [i.text, i.done]), [['sketch', false], ['ink', false]]);
+  assert.deepEqual(d.categories.map((c: Json) => c.name), ['Combat']);
+  assert.equal(d.description, `Use /api/v1/files/${newHero.id}/content`, 'links to copied files point at the copies');
+  assert.deepEqual(d.activity.map((a: Json) => [a.actor, a.message]), [['claude', `Created in Open as a copy of ${draw.key}`]]);
+  assert.equal((await get(draw.id)).status, 'in_progress');
+  assert.equal(fresh.get('Loose art')!.folderId, newArt.id);
+  // Sub-tasks: under the parent's copy, with it if they lived with it, else in their own epoch...
+  const c2 = await get(fresh.get('Card')!.id);
+  assert.deepEqual([c2.folderId, c2.subtasks], [newSrc, { total: 2, done: 0 }]);
+  const ct2 = await get(fresh.get('Card text')!.id);
+  assert.deepEqual([ct2.parentId, ct2.folderId], [c2.id, newSrc]);
+  assert.equal(ct2.activity[0].message, `Created in Open as a copy of ${cardText.key} as a sub-task of ${c2.key}`);
+  const cv2 = await get(fresh.get('Card VFX')!.id);
+  assert.deepEqual([cv2.parentId, cv2.epochId], [c2.id, vfx.id]);
+  assert.deepEqual((await get(card.id)).subtasks, { total: 2, done: 0 });
+  // ...and one copied without its parent keeps that parent, which hears about it.
+  const o2 = await get(fresh.get('Orphan')!.id);
+  assert.deepEqual([o2.parentId, o2.folderId], [outer.id, newArt.id]);
+  const outerNow = await get(outer.id);
+  assert.deepEqual(outerNow.subtasks, { total: 2, done: 0 });
+  assert.equal(outerNow.activity[0].message, `Added sub-task ${o2.key} "Orphan"`);
+
+  // Files: each copy has its own stored content; documents point at the copies of files that were copied too.
+  assert.equal(await content(newHero.id), 'PNGDATA');
+  const notesCopy = await content(newNotes.id);
+  assert.equal(notesCopy, `![hero](/api/v1/files/${newHero.id}/content)\n[readme](/api/v1/files/${readme.id}/content)`);
+  assert.equal(newNotes.size, Buffer.byteLength(notesCopy));
+  assert.equal(await content(notes.id), notesText);
+  const stored = ctx.db.prepare('SELECT DISTINCT stored_name FROM files WHERE id IN (?, ?, ?, ?)').all(hero.id, notes.id, newHero.id, newNotes.id);
+  assert.equal(stored.length, 4);
+  assert.equal(blobs(), start.blobs + 2);
+  const e2 = (await call('GET', `/api/v1/epochs/${epochsIn(newSrc)[0].id}`)).body;
+  assert.equal(e2.description, `Hero: /api/v1/files/${newHero.id}/content`);
+
+  // Names change only for the item copied, only when taken where it lands; files keep their extension.
+  const dup1 = await copy({ item: { kind: 'file', id: hero.id }, to: { folderId: art.id } });
+  const dup2 = await copy({ item: { kind: 'file', id: hero.id }, to: { folderId: art.id } });
+  assert.deepEqual([dup1.body.item.name, dup2.body.item.name, dup1.body.files, dup1.body.tasks], ['hero (copy).png', 'hero (copy 2).png', 1, 0]);
+  const notesAlone = await copy({ item: { kind: 'file', id: notes.id }, to: { folderId: null } });
+  assert.equal(notesAlone.body.item.name, 'notes.md');
+  assert.equal(await content(notesAlone.body.item.id), notesText, 'links to files that were not copied stay as they are');
+
+  // An epoch, with its tasks.
+  const ep = await copy({ item: { kind: 'epoch', id: sprites.id }, to: { folderId: art.id } });
+  assert.deepEqual([ep.body.item.name, ep.body.epochs, ep.body.tasks], ['Sprites (copy)', 1, 1]);
+  assert.equal((await tree()).tasks.filter((x: Json) => x.epochId === ep.body.item.id)[0].title, 'Draw hero');
+
+  // A task: its sub-task that lived with it follows it into the epoch, the one in another epoch stays there.
+  const into = await copy({ item: { kind: 'task', id: card.id }, to: { epochId: sprites.id } });
+  assert.deepEqual([into.status, into.body.item.name, into.body.tasks, into.body.subtasksElsewhere], [201, 'Card', 3, 1]);
+  const c3 = await get(into.body.item.id);
+  assert.deepEqual([c3.epochId, c3.folderId], [sprites.id, null]);
+  const kids = await Promise.all(c3.children.map((k: Json) => get(k.id)));
+  assert.deepEqual(kids.map((k) => [k.title, k.epochId]).sort(), [['Card VFX', vfx.id], ['Card text', sprites.id]]);
+  assert.equal((await copy({ item: { kind: 'task', id: card.id }, to: { folderId: src.id } })).body.item.name, 'Card (copy)');
+  // A sub-task on its own stays a sub-task of the same parent.
+  const alone = await copy({ item: { kind: 'task', id: cardText.id }, to: { folderId: null } });
+  assert.deepEqual([alone.body.tasks, (await get(alone.body.item.id)).parentId], [1, card.id]);
+  assert.equal((await get(card.id)).subtasks.total, 3);
+
+  // Where a copy can't go.
+  const refused: Array<[unknown, number]> = [
+    [{ item: { kind: 'folder', id: src.id }, to: { folderId: src.id } }, 400],
+    [{ item: { kind: 'folder', id: src.id }, to: { folderId: art.id } }, 400],
+    [{ item: { kind: 'epoch', id: sprites.id }, to: { epochId: vfx.id } }, 400],
+    [{ item: { kind: 'file', id: hero.id }, to: { epochId: vfx.id } }, 400],
+    [{ item: { kind: 'task', id: card.id }, to: {} }, 400],
+    [{ item: { kind: 'task', id: card.id }, to: { folderId: null, epochId: vfx.id } }, 400],
+    [{ item: { kind: 'board', id: card.id }, to: { folderId: null } }, 400],
+    [{ item: { kind: 'task', id: card.id }, to: { folderId: 999999 } }, 404],
+    [{ item: { kind: 'task', id: card.id }, to: { epochId: 999999 } }, 404],
+    [{ item: { kind: 'file', id: 999999 }, to: { folderId: null } }, 404],
+  ];
+  for (const [body, status] of refused) assert.equal((await copy(body)).status, status, JSON.stringify(body));
+
+  // Limits on what one copy makes.
+  const limits = { ...COPY_LIMITS };
+  try {
+    COPY_LIMITS.items = 5;
+    const many = await copy({ item: { kind: 'folder', id: src.id }, to: { folderId: null }, dryRun: true });
+    assert.equal(many.status, 400);
+    assert.match(many.body.error, /more than 5 items/);
+    Object.assign(COPY_LIMITS, limits, { bytes: 10 });
+    const big = await copy({ item: { kind: 'folder', id: src.id }, to: { folderId: null } });
+    assert.equal(big.status, 400);
+    assert.match(big.body.error, /one copy can hold/);
+  } finally {
+    Object.assign(COPY_LIMITS, limits);
+  }
+
+  // All or nothing: a failure while the rows are written leaves no rows and no stored files behind...
+  ctx.db.prepare('UPDATE tasks SET type = ? WHERE id = ?').run('Ghost', loose.id);
+  const beforeFail = { tree: await tree(), blobs: blobs() };
+  const failed = await copy({ item: { kind: 'folder', id: src.id }, to: { folderId: null } });
+  assert.equal(failed.status, 400);
+  assert.match(failed.body.error, /Unknown type "Ghost"/);
+  assert.deepEqual(await tree(), beforeFail.tree);
+  assert.equal(blobs(), beforeFail.blobs);
+  ctx.db.prepare('UPDATE tasks SET type = ? WHERE id = ?').run(loose.type, loose.id);
+  // ...and so does a stored file that has gone missing, after the files before it were copied.
+  const lost = await upload(art.id, 'zzz-lost.txt', 'gone', 'text/plain');
+  const lostName = (ctx.db.prepare('SELECT stored_name FROM files WHERE id = ?').get(lost.id) as { stored_name: string }).stored_name;
+  fs.renameSync(path.join(ctx.filesDir, lostName), path.join(tmp, 'lost-blob'));
+  const beforeMissing = blobs();
+  const missing = await copy({ item: { kind: 'folder', id: art.id }, to: { folderId: null } });
+  assert.equal(missing.status, 409);
+  assert.match(missing.body.error, /zzz-lost\.txt/);
+  assert.equal(blobs(), beforeMissing);
+  fs.renameSync(path.join(tmp, 'lost-blob'), path.join(ctx.filesDir, lostName));
+});
+
+test('copy: a page saved in another encoding keeps every byte when its links are repointed', async () => {
+  const folder = (await call('POST', '/api/v1/folders', { name: 'Old pages' })).body;
+  const b = '----latin';
+  const upload = async (filename: string, type: string, data: Buffer) => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/files',
+      headers: { cookie, 'x-pm-client': 'web', 'content-type': `multipart/form-data; boundary=${b}` },
+      payload: Buffer.concat([
+        Buffer.from(`--${b}\r\nContent-Disposition: form-data; name="folderId"\r\n\r\n${folder.id}\r\n`),
+        Buffer.from(`--${b}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: ${type}\r\n\r\n`),
+        data,
+        Buffer.from(`\r\n--${b}--\r\n`),
+      ]),
+    });
+    assert.equal(res.statusCode, 201, res.body);
+    return JSON.parse(res.body).files[0] as Json;
+  };
+  // "Café" in Windows-1252: the é is the single byte E9, which isn't valid UTF-8.
+  const page = (imageId: number) =>
+    Buffer.concat([Buffer.from(`<img src="/api/v1/files/${imageId}/content"> Caf`), Buffer.from([0xe9]), Buffer.from('\n')]);
+  const image = await upload('logo.png', 'image/png', Buffer.from('PNGDATA'));
+  await upload('guide.html', 'text/html', page(image.id));
+
+  const res = await call('POST', '/api/v1/copy', { item: { kind: 'folder', id: folder.id }, to: { folderId: null } });
+  assert.equal(res.status, 201, JSON.stringify(res.body));
+  const copies = (await call('GET', '/api/v1/tree')).body.files.filter((f: Json) => f.folderId === res.body.item.id);
+  const newImage = copies.find((f: Json) => f.name === 'logo.png');
+  const newPage = copies.find((f: Json) => f.name === 'guide.html');
+  const stored = await app.inject({ method: 'GET', url: `/api/v1/files/${newPage.id}/content`, headers: { cookie } });
+  assert.deepEqual(stored.rawPayload, page(newImage.id), 'only the link changed');
+  assert.equal(newPage.size, page(newImage.id).length);
 });
 
 test('passwords and tokens are stored only as hashes', async () => {
@@ -1012,7 +1647,7 @@ test('projects: each has its own keys, types and categories; new accounts start 
 });
 
 test('projects are private: another account gets "not found" for everything in them', async () => {
-  // Things in jay's project T.
+  // Things in alice's project T.
   const epoch = (await call('POST', '/api/v1/epochs', { name: 'Private epoch' })).body;
   const folder = (await call('POST', '/api/v1/folders', { name: 'Private folder' })).body;
   const task = (await call('POST', '/api/v1/tasks', { title: 'Private task', checklist: ['secret step'], epochId: epoch.id })).body;
@@ -1023,6 +1658,7 @@ test('projects are private: another account gets "not found" for everything in t
   const entry = (await call('POST', '/api/v1/time', { taskId: task.id, minutes: 5 })).body;
   const project = (await call('GET', '/api/v1/projects')).body.projects.find((p: Json) => p.key === 'T');
   const jayToken = (await call('GET', '/api/v1/tokens')).body.tokens[0];
+  const template = (await call('POST', '/api/v1/templates', { name: 'Private template' })).body;
 
   createUser(ctx.db, 'mallory', 'mallory-password');
   const m = await loginAs('mallory', 'mallory-password');
@@ -1049,6 +1685,8 @@ test('projects are private: another account gets "not found" for everything in t
     ['DELETE', `/api/v1/checklist/${item.id}`],
     ['POST', `/api/v1/tasks/${ownTask.id}/links`, { task: task.key }],
     ['DELETE', `/api/v1/tasks/${task.id}`],
+    ['DELETE', `/api/v1/tasks/${task.id}?withSubtasks=true`],
+    ['GET', `/api/v1/tasks?parent=${task.key}`],
     ['GET', `/api/v1/epochs/${epoch.id}`],
     ['PATCH', `/api/v1/epochs/${epoch.id}`, { name: 'pwned' }],
     ['DELETE', `/api/v1/epochs/${epoch.id}`],
@@ -1075,13 +1713,36 @@ test('projects are private: another account gets "not found" for everything in t
     ['POST', '/api/v1/time', { taskId: task.id, minutes: 5 }],
     ['POST', '/api/v1/time/start', { epochId: epoch.id }],
     ['GET', `/api/v1/time?taskId=${task.key}`],
-    // References from Mallory's own project to Jay's things.
+    // References from Mallory's own project to Alice's things.
     ['POST', '/api/v1/tasks', { title: 'x', epochId: epoch.id }],
     ['POST', '/api/v1/tasks', { title: 'x', folderId: folder.id }],
     ['PATCH', `/api/v1/tasks/${ownTask.id}`, { folderId: folder.id }],
+    ['POST', '/api/v1/tasks', { title: 'x', parent: task.key }],
+    ['POST', '/api/v1/tasks', { title: 'x', parent: task.id }],
+    ['PATCH', `/api/v1/tasks/${ownTask.id}`, { parent: task.key }],
+    ['GET', `/api/v1/templates/${template.id}`],
+    ['GET', '/api/v1/templates/Private%20template'],
+    ['GET', '/api/v1/templates?project=T'],
+    ['PATCH', `/api/v1/templates/${template.id}`, { name: 'pwned' }],
+    ['DELETE', `/api/v1/templates/${template.id}`],
+    ['POST', '/api/v1/templates', { name: 'x', fromTask: task.key }],
+    ['POST', '/api/v1/tasks', { template: template.id, title: 'x' }],
+    ['POST', '/api/v1/tasks/bulk', { action: 'update', ids: [task.id], set: { priority: 'low' } }],
+    ['POST', '/api/v1/tasks/bulk', { action: 'move', ids: [task.key], status: 'open' }],
+    ['POST', '/api/v1/tasks/bulk', { action: 'categories', ids: [task.id], add: ['x'] }],
+    ['POST', '/api/v1/tasks/bulk', { action: 'delete', ids: [ownTask.id, task.id] }],
+    ['POST', '/api/v1/tasks/bulk', { action: 'update', ids: [ownTask.id], set: { parent: task.key } }],
+    ['POST', '/api/v1/tasks/bulk', { action: 'update', ids: [ownTask.id], set: { epochId: epoch.id } }],
     ['POST', '/api/v1/epochs', { name: 'x', folderId: folder.id }],
     ['POST', '/api/v1/folders', { name: 'x', parentId: folder.id }],
     ['POST', '/api/v1/docs', { name: 'x.md', folderId: folder.id }],
+    ['POST', '/api/v1/copy', { item: { kind: 'folder', id: folder.id }, to: { folderId: null } }],
+    ['POST', '/api/v1/copy', { item: { kind: 'folder', id: folder.id }, to: { folderId: null }, dryRun: true }],
+    ['POST', '/api/v1/copy', { item: { kind: 'epoch', id: epoch.id }, to: { folderId: null } }],
+    ['POST', '/api/v1/copy', { item: { kind: 'task', id: task.id }, to: { folderId: null } }],
+    ['POST', '/api/v1/copy', { item: { kind: 'file', id: doc.id }, to: { folderId: null } }],
+    ['POST', '/api/v1/copy', { item: { kind: 'task', id: ownTask.id }, to: { epochId: epoch.id } }],
+    ['POST', '/api/v1/copy', { item: { kind: 'task', id: ownTask.id }, to: { folderId: folder.id } }],
   ];
   for (const auth of ['session', 'token'] as const) {
     if (auth === 'token') m.useToken(mToken);
@@ -1106,6 +1767,7 @@ test('projects are private: another account gets "not found" for everything in t
 
   // Lists only show Mallory's own things; account and token admin is off limits.
   assert.deepEqual((await m.req('GET', '/api/v1/projects')).body.projects.map((p: Json) => p.key), ['MAL']);
+  assert.deepEqual((await m.req('GET', '/api/v1/templates')).body.templates, []);
   const mTree = (await m.req('GET', '/api/v1/tree')).body;
   assert.deepEqual(mTree.tasks.map((t: Json) => t.key), [ownTask.key]);
   assert.equal(mTree.files.length, 1);
@@ -1115,8 +1777,12 @@ test('projects are private: another account gets "not found" for everything in t
   assert.equal((await m.req('GET', '/api/v1/backups')).status, 403);
   assert.deepEqual((await m.req('GET', '/api/v1/tokens')).body.tokens.map((t: Json) => t.name), ['mallory-bot']);
   assert.equal((await m.req('DELETE', `/api/v1/tokens/${jayToken.id}`)).status, 404);
+  // A raw parentId is ignored rather than checked, so it can't be used to probe for other people's tasks.
+  const probe = await m.req('POST', '/api/v1/tasks', { title: 'Probe', parentId: task.id });
+  assert.equal(probe.status, 201);
+  assert.equal(probe.body.parentId, null);
 
-  // Nothing changed on Jay's side.
+  // Nothing changed on Alice's side.
   const after = (await call('GET', `/api/v1/tasks/${task.id}`)).body;
   assert.equal(after.title, 'Private task');
   assert.equal(after.checklistItems.length, 1);

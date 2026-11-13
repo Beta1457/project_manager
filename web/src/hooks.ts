@@ -3,7 +3,7 @@ import { useQuery, useQueryClient, type QueryClient } from '@tanstack/react-quer
 import { api, CLIENT_ID, V1, getCurrentProject, lastWriteStartedAt } from './api';
 import { STATUS_COLORS } from './util';
 import { useProjectId } from './projectContext';
-import type { Diagram, DiagramList, Epoch, Folder, Meta, Task, TaskDetail, TimeEntry, Tree, User } from './types';
+import type { Diagram, DiagramList, Epoch, Folder, Meta, Task, TaskDetail, Template, TimeEntry, Tree, User } from './types';
 
 export interface TaskFilters {
   q?: string;
@@ -14,6 +14,8 @@ export interface TaskFilters {
   epoch?: string;
   folder?: string;
   createdBy?: string;
+  /** "none" hides sub-tasks. */
+  parent?: string;
 }
 
 /** A task by id or by key ("APP-12"). Both are unique on the server. */
@@ -78,6 +80,14 @@ export function useEpochs() {
   return useQuery({ queryKey: ['epochs', pid], queryFn: () => api.get<{ epochs: Epoch[] }>(`${V1}/epochs`, pid).then((r) => r.epochs) });
 }
 
+export function useTemplates() {
+  const pid = useProjectId();
+  return useQuery({
+    queryKey: ['templates', pid],
+    queryFn: () => api.get<{ templates: Template[] }>(`${V1}/templates`, pid).then((r) => r.templates),
+  });
+}
+
 export const useEpoch = (id: number | null) =>
   useQuery({ queryKey: ['epoch', id], queryFn: () => api.get<Epoch>(`${V1}/epochs/${id}`), enabled: id !== null });
 
@@ -126,6 +136,7 @@ const INVALIDATE: Record<string, string[]> = {
   categories: ['meta', 'tasks', 'task'],
   types: ['meta'],
   diagrams: ['diagrams', 'diagram'],
+  templates: ['templates'],
   time: ['time', 'running', 'tasks', 'task', 'epochs', 'epoch'],
   // A new key renames every task key; a new name or colour shows in the switcher.
   projects: ['projects', 'meta', 'tasks', 'task', 'tree', 'time', 'running', 'users'],
@@ -161,33 +172,53 @@ export function useLiveUpdates(enabled: boolean): void {
     let others = new Set<string>();
     let own = new Set<string>();
     let timer: number | undefined;
-    const es = new EventSource('/api/events');
-    es.onmessage = (msg) => {
-      try {
-        const e = JSON.parse(msg.data) as { kind: string; origin?: string; projectId?: number };
-        // The server only sends events from your own projects; this tab shows one of them.
-        const kind = e.projectId !== undefined && e.projectId !== getCurrentProject() ? `elsewhere:${e.kind}` : e.kind;
-        (e.origin === CLIENT_ID ? own : others).add(kind);
-        window.clearTimeout(timer);
-        timer = window.setTimeout(() => {
-          invalidateKinds(qc, others);
-          invalidateKinds(qc, [...own].filter((k) => !others.has(k)), lastWriteStartedAt);
-          others = new Set();
-          own = new Set();
-        }, 150);
-      } catch {
-        /* ignore malformed events */
-      }
-    };
     // After a *re*connect (e.g. the phone woke up) refresh everything once; skip the initial connect.
     let opened = false;
-    es.onopen = () => {
-      if (opened) void qc.invalidateQueries();
-      opened = true;
+    let es: EventSource | null = null;
+    const connect = () => {
+      es = new EventSource('/api/events');
+      es.onmessage = (msg) => {
+        try {
+          const e = JSON.parse(msg.data) as { kind: string; origin?: string; projectId?: number };
+          // The server only sends events from your own projects; this tab shows one of them.
+          const kind = e.projectId !== undefined && e.projectId !== getCurrentProject() ? `elsewhere:${e.kind}` : e.kind;
+          (e.origin === CLIENT_ID ? own : others).add(kind);
+          window.clearTimeout(timer);
+          timer = window.setTimeout(() => {
+            invalidateKinds(qc, others);
+            invalidateKinds(qc, [...own].filter((k) => !others.has(k)), lastWriteStartedAt);
+            others = new Set();
+            own = new Set();
+          }, 150);
+        } catch {
+          /* ignore malformed events */
+        }
+      };
+      es.onopen = () => {
+        if (opened) void qc.invalidateQueries();
+        opened = true;
+      };
     };
-    return () => {
+    // A page the browser keeps for Back (the back/forward cache) would keep its stream open, and browsers
+    // allow only six connections to a server: let go of it while the page is away, and reconnect (which
+    // refreshes everything) when it comes back.
+    const onHide = (e: PageTransitionEvent) => {
+      if (!e.persisted) return;
       window.clearTimeout(timer);
-      es.close();
+      es?.close();
+      es = null;
+    };
+    const onShow = (e: PageTransitionEvent) => {
+      if (e.persisted && !es) connect();
+    };
+    connect();
+    window.addEventListener('pagehide', onHide);
+    window.addEventListener('pageshow', onShow);
+    return () => {
+      window.removeEventListener('pagehide', onHide);
+      window.removeEventListener('pageshow', onShow);
+      window.clearTimeout(timer);
+      es?.close();
     };
   }, [enabled, qc]);
 }

@@ -28,7 +28,7 @@ With several projects and none named, they answer 400 and list your projects. Re
 | `GET /api/v1/projects` | `{projects[]}`, oldest first |
 | `GET /api/v1/projects/current` | The project this request would work in (see above) |
 | `GET /api/v1/projects/:id` | `:id` is the id or the key |
-| `POST /api/v1/projects` | `{key*, name*, color?, copyFrom?: projectId, categories?: [[name, color]]}` → 201. The key prefixes task keys (`APP` → `APP-12`): a letter, then up to 9 letters or digits, unique on the server. `copyFrom` copies task types, categories and column colours from another of your projects; otherwise you get the default types and `categories`. |
+| `POST /api/v1/projects` | `{key*, name*, color?, copyFrom?: projectId, categories?: [[name, color]]}` → 201. The key prefixes task keys (`APP` → `APP-12`): a letter, then up to 9 letters or digits, unique on the server. `copyFrom` copies task types, categories, column colours and task templates from another of your projects; otherwise you get the default types and `categories`. |
 | `PATCH /api/v1/projects/:id` | `{key?, name?, color?}`. A new key renames every task key in the project (`APP-12` → `WEB-12`). |
 | `DELETE /api/v1/projects/:id?confirm=KEY` | Web session only, and the key must be repeated as `confirm`: deletes the project's tasks, epochs, folders, files, diagrams and time. Backups keep their copies. |
 
@@ -53,21 +53,41 @@ A task reference is its key (`APP-12`, case-insensitive) or its numeric `id`. A 
 
 | Endpoint | Notes |
 |---|---|
-| `GET /api/v1/tasks` | Query: `q` (text, or a key like `APP-12`; keys of other projects match nothing), `status`, `type`, `category`, `priority` (comma-separated lists), `epoch` (id or `none`), `folder` (id — includes sub-folders and their epochs — or `inbox`), `createdBy`, `limit`, `summary=1` (omit descriptions) |
-| `GET /api/v1/tasks/:ref` | Includes `checklistItems`, `links` and `activity` |
-| `POST /api/v1/tasks` | `{title*, description, type, status, priority, epochId, folderId, categories: [names or ids], checklist: [text], estimate: "1h30m" \| estimateMinutes, note}` |
-| `PATCH /api/v1/tasks/:ref` | Any of the create fields. Setting `epochId` moves the task into the epoch; setting `folderId` (or `null` = inbox) removes it from its epoch. `note` is logged with a status change. |
+| `GET /api/v1/tasks` | Query: `q` (text, or a key like `APP-12`; keys of other projects match nothing), `status`, `type`, `category`, `priority` (comma-separated lists), `epoch` (id or `none`), `folder` (id — includes sub-folders and their epochs — or `inbox`), `parent` (a task's key or id for its sub-tasks, `none` for top-level tasks only, `any` for sub-tasks only), `createdBy`, `limit`, `summary=1` (omit descriptions) |
+| `GET /api/v1/tasks/:ref` | Includes `checklistItems`, `links`, `children` (its sub-tasks, oldest first, without descriptions) and `activity` |
+| `POST /api/v1/tasks` | `{title*, description, type, status, priority, epochId, folderId, parent: "APP-3" \| 3, categories: [names or ids], checklist: [text], estimate: "1h30m" \| estimateMinutes, note}`. With `template` (a name or id), the task and its sub-tasks come from that template: see [Task templates](#task-templates). |
+| `PATCH /api/v1/tasks/:ref` | Any of the create fields. Setting `epochId` moves the task into the epoch; setting `folderId` (or `null` = inbox) removes it from its epoch. `note` is logged with a status change. `parent` makes it a sub-task of another task; `null` (or `"none"`) makes it a top-level task again. |
 | `POST /api/v1/tasks/:ref/advance` | `{note?}` → next status |
 | `POST /api/v1/tasks/:ref/status` | `{status*, note?}` |
 | `POST /api/v1/tasks/:ref/move` | Board ordering: `{status*, beforeId?}` (null = end of column) |
 | `POST /api/v1/tasks/:ref/comments` | `{message*}` |
 | `POST /api/v1/tasks/:ref/checklist` | `{text*}` |
 | `PATCH /api/v1/checklist/:itemId` | `{text?, done?}` |
-| `DELETE /api/v1/checklist/:itemId`, `DELETE /api/v1/tasks/:ref` | Deleting a task also removes its links (noted in the linked tasks' activity) |
+| `DELETE /api/v1/checklist/:itemId` | Removes the item |
+| `DELETE /api/v1/tasks/:ref` | `?withSubtasks=true` also deletes its sub-tasks; without it they stay, as top-level tasks. Links go too. Tasks that stay get a note in their activity. → `{ok, deleted}` (how many tasks were deleted) |
+| `POST /api/v1/tasks/bulk` | Changes up to 500 tasks of one project in one go, all or nothing. `{action*, ids*: ["APP-12", 13, ...]}` and, by action: `"update"` with `set: {type, status, priority, epochId, folderId, estimate, estimateMinutes, categories, note, parent}` (any of them, the same as in a PATCH; not the title, description or checklist, which are each task's own); `"move"` with `status*` and `beforeId?` (the tasks end up together, in the order given, before that task or at the end of the column); `"categories"` with `add` and/or `remove`: [names or ids]; `"delete"` with `withSubtasks?`. A task that doesn't exist or isn't yours fails the whole request (404), and so do tasks from two projects (400); nothing changes until every task has been checked. Each task gets its own activity entry. → `{ok, tasks}` (the tasks as they are now), or `{ok, deleted}` |
 | `POST /api/v1/tasks/:ref/links` | `{task*: "APP-9" \| 9, kind?}`. `kind` is one of `relates` (default), `blocks`, `blocked_by`, `duplicates` or `duplicated_by`, read from this task's side; labels like `"blocked by"` also work. Both tasks must be in the same project (400 otherwise). 409 if the two tasks are already linked: one link per pair. Returns the task, including `links`. |
 | `DELETE /api/v1/tasks/:ref/links/:other` | Removes the link between the two tasks, whichever direction it was made in |
 
 Each entry in `links` is `{id, kind, outgoing, label, task: {id, key, title, status, statusLabel, type}}`, where `label` reads from this task's side, e.g. `"blocked by"`. Task lists include `openBlockers`: the number of tasks blocking this one that haven't reached Alpha Complete.
+
+**Sub-tasks.** A sub-task is a full task with a `parent` in the same project: it has its own status, estimate, time, epoch and folder (often a different epoch from its parent's). One level only: a sub-task can't have sub-tasks, and a task with sub-tasks can't become one (400). Tasks include `parentId`, `parent: {id, key, title} | null` and `subtasks: {done, total}`, where `done` counts sub-tasks at Alpha Complete or later. Adding, moving and removing a sub-task is noted in the activity of the task and of its parent.
+
+## Task templates
+
+A template holds a task's fields and, if you like, sub-tasks, saved in a project under a name (unique in the project, ignoring case, and with at least one letter: a bare number means a template id). Types, categories and epochs are stored by name and looked up each time the template is used, so a template keeps working after they change, and in new projects that copy it (`copyFrom`). `{title}` in a title, description or checklist item becomes the title given when the template is used.
+
+| Endpoint | Notes |
+|---|---|
+| `GET /api/v1/templates` | The current project's templates, by name |
+| `GET /api/v1/templates/:ref` | One template, by id or name |
+| `POST /api/v1/templates` | `{name*, title, description, type, priority, categories: [names], estimate: "1h30m" \| estimateMinutes, checklist: [text], epoch: name, subtasks: [{title*, description, type, priority, categories, estimate, checklist, epoch}]}` → 201. `title` defaults to `"{title}"`. Or `{name*, fromTask: "APP-12", includeSubtasks?}` saves an existing task (checklist texts, unticked); other fields sent along replace what it copies. 409 if the name is taken. At most 50 sub-tasks, 100 checklist items and 50 categories per task, and 200 KB in all, `fromTask` included (400). |
+| `PATCH /api/v1/templates/:ref` | Any of the fields; `subtasks` replaces the whole list. 409 if a new name is taken |
+| `DELETE /api/v1/templates/:ref` | Tasks already made from it stay as they are |
+
+A template is `{id, projectId, name, title, description, type, priority, categories, estimateMinutes, checklist, epoch, subtasks, createdBy, createdAt, updatedAt}`, where `type`, `priority`, `estimateMinutes` and `epoch` may be null (the default type and priority; no estimate; where the task is added).
+
+**Using a template.** `POST /api/v1/tasks {template: "Card", title: "Fireball", ...}` creates the task and its sub-tasks in one go. Fields in the request replace the template's; `categories` and `checklist` replace the whole list. A title is needed only when the template's title has `{title}` in it; otherwise a title sent replaces the template's. The task goes to the template's epoch unless the request gives `epochId` or `folderId`. Sub-tasks start in the first status, in the epoch their template names, else where the new task is. A task made from a template with sub-tasks can't be a sub-task itself (400). The response is the new task, with `children`, plus `warnings`: a type, category or epoch name the project doesn't have is skipped with a note there instead of failing, and an epoch name that several epochs share goes to the first of them.
 
 ## Epochs
 
@@ -83,6 +103,12 @@ Each entry in `links` is `{id, kind, outgoing, label, task: {id, key, title, sta
 - `POST /api/v1/files` — `multipart/form-data`; optional field `folderId` before one or more file parts
 - `GET /api/v1/files/:id/content[?download=1]` — text/code files are served as `text/plain` (never executed)
 - `PATCH /api/v1/files/:id {name?, folderId?}` · `DELETE /api/v1/files/:id`
+- `POST /api/v1/copy {item*: {kind: "folder"|"epoch"|"task"|"file", id}, to*: {folderId} | {epochId}, dryRun?}` — the explorer's Copy, Paste and Duplicate → 201 `{ok, folders, epochs, tasks, files, bytes, subtasksElsewhere, item: {kind, id, name}}`: how many of each were made, and the copy of `item`. `dryRun: true` returns the same counts and makes nothing.
+  - A folder brings everything inside it (sub-folders, epochs, tasks and files), an epoch its tasks, a task its sub-tasks. `folderId: null` is the top level, or for a task the Inbox. Only tasks go into an epoch, and a folder can't go into itself or a folder inside it (400).
+  - Copied tasks get new keys and start in the first status, checklists unticked; their time, comments, links and activity aren't copied. A sub-task copied with its parent goes under the parent's copy: into the copy of its epoch or folder if that is copied too, else next to the parent's copy if it was next to the parent, else into its own epoch or folder (`subtasksElsewhere` counts these). A sub-task copied on its own keeps its parent.
+  - Each file gets its own copy of the stored content, and `/api/v1/files/<id>` links in copied documents and descriptions point at the copies of files copied with them.
+  - Only the item itself is renamed, to "Name (copy)" or "Name (copy 2)", when its name is taken where it lands.
+  - At most 2,000 items and 500 MB of files in one copy (400). All or nothing: if anything fails, nothing is made.
 - Upload field `purpose=attachment` (without `folderId`) stores the file in the project's root **Attachments** folder. The web editors use this for images pasted into task and epoch descriptions.
 - Markdown/text documents: `POST /api/v1/docs {name*, folderId?, content?}` (`.md` added if there's no extension) · `PUT /api/v1/files/:id/content {content}` (text files only, max 2 MB)
 - Embed images in any markdown field with `![alt](/api/v1/files/<id>/content)` (SVG: use `/render` instead of `/content`)
@@ -137,6 +163,6 @@ The first account created on a server is an admin. Admins manage accounts and se
 
 ## Live updates
 
-`GET /api/events` — Server-Sent Events stream; each message is `{"kind": "tasks"|"epochs"|"folders"|"files"|"categories"|"types"|"diagrams"|"time"|"projects", "id"?, "actor"?, "origin"?, "projectId"?}`. A stream only receives changes in the caller's own projects (and to their own project list). `origin` echoes the optional `x-pm-client-id` request header of the browser tab that made the change.
+`GET /api/events` — Server-Sent Events stream; each message is `{"kind": "tasks"|"epochs"|"folders"|"files"|"categories"|"types"|"diagrams"|"time"|"templates"|"projects", "id"?, "actor"?, "origin"?, "projectId"?}`. A stream only receives changes in the caller's own projects (and to their own project list). `origin` echoes the optional `x-pm-client-id` request header of the browser tab that made the change.
 
 <!-- Part of Project Manager. Copyright (c) 2026 Bettafish Games, LLC. MIT License. -->

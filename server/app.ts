@@ -19,6 +19,8 @@ import { registerDiagramRoutes } from './routes/diagrams.ts';
 import { registerAdminRoutes } from './routes/admin.ts';
 import { registerIntegrationRoutes } from './routes/integration.ts';
 import { registerProjectRoutes } from './routes/projects.ts';
+import { registerTemplateRoutes } from './routes/templates.ts';
+import { registerCopyRoutes } from './routes/copy.ts';
 import { createAccess } from './access.ts';
 import { requestContext } from './request-context.ts';
 
@@ -91,9 +93,11 @@ export async function buildApp(config: AppConfig, opts: { dbFile?: string; logge
   registerProjectRoutes(app, ctx);
   registerMetaRoutes(app, ctx);
   registerTaskRoutes(app, ctx);
+  registerTemplateRoutes(app, ctx);
   registerStructureRoutes(app, ctx);
   registerTimeRoutes(app, ctx);
   registerFileRoutes(app, ctx);
+  registerCopyRoutes(app, ctx);
   registerDiagramRoutes(app, ctx);
   registerIntegrationRoutes(app);
 

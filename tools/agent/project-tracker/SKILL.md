@@ -62,10 +62,32 @@ If the user asks which of their ideas to do next, list them and recommend an ord
 - **Progress notes** for meaningful decisions, blockers or surprises: `pm task note APP-12 "<what and why>"`. Keep notes short and factual; no notes for trivial steps.
 - **Checklist**: `pm task get APP-12` shows item ids; tick with `pm item <id>` (`--undo` to untick); add items with `pm task check APP-12 "text"`; reword with `pm item <id> --text "..."`; remove with `pm item <id> --remove`.
 - **Scope changes**: keep the task current with `pm task update APP-12 --title/--desc-file/--category/--priority/--estimate ...` rather than letting the description go stale.
+- **Several tasks at once**: `pm task status APP-12 APP-13 "Alpha QA" --note "..."` and `pm task update APP-12 APP-13 --epoch "Version 1.0"` change them all in one request; if one change is refused, none is made. Every flag but `--title` and `--desc` works this way.
 - **Bugs found along the way** that are out of scope: create a separate `--type Bug` task in the same epoch rather than silently fixing or forgetting them. Link it to the task you were on: `pm task link APP-31 relates to APP-12`.
 - **Links between tasks**: `pm task link APP-12 blocks APP-9` (also `blocked by`, `duplicates`, `duplicated by`, `relates to`; plain `pm task link APP-12 APP-9` means relates to). Remove a link with `pm task unlink APP-12 APP-9`. Writing a key like `APP-9` in any description or note also makes it clickable in the web UI.
   - Record a dependency as soon as you find one: if APP-12 can't be finished until APP-9 is, run `pm task link APP-12 blocked by APP-9`.
   - If you find a duplicate, link it with `duplicates` and tell the user. Don't delete it.
+
+## Sub-tasks, checklist items and links
+
+- **Checklist item**: a step of this task that needs no status of its own ("Write tests", "Update the docs").
+- **Sub-task**: a piece of the work that moves across the board by itself, is done or checked separately, or belongs in another epoch. A sub-task is a full task with its own status, estimate, time and epoch.
+- **`blocked by` link**: a dependency between two separate pieces of work.
+
+```
+pm task create --title "Card: Fireball" --type Content --epoch "Card Sprint"
+pm task create --title "Fireball VFX" --type Art --epoch "VFX" --parent APP-40
+pm task create --title "Fireball SFX" --type Audio --epoch "SFX" --parent APP-40
+pm task subtasks APP-40                  # its sub-tasks and how many are done (Alpha Complete or later)
+pm task update APP-44 --parent APP-40    # move an existing task under it; --parent none makes it top-level again
+```
+
+- One level only, in one project: a sub-task can't have sub-tasks of its own, and a task with sub-tasks can't become one.
+- `pm task get` shows a task's parent and sub-tasks; lists show `parent=APP-40` and `subtasks=1/2 done`. `pm task list --parent APP-40` lists them, `--parent none` hides all sub-tasks.
+- Before moving a parent to Alpha QA, check `pm task subtasks` and tell the user which sub-tasks aren't done yet.
+- Deleting a parent keeps its sub-tasks (they become top-level tasks) unless you add `--with-subtasks`. Only delete when the user asks.
+
+**Templates.** When the user keeps making the same kind of task (a card, a boss, a bug report), check `pm template list` and use one: `pm task create --template Card --title "Fireball"` makes the task and its sub-tasks, each in its own epoch. `{title}` in the template becomes the title you give; any other flag replaces the template's value. Read the `Note:` lines it prints (a type, category or epoch the project doesn't have was skipped) and tell the user. Save a task as a template with `pm template create --name Card --from-task APP-40 --with-subtasks --title "Card: {title}"`, but only when the user asks for one.
 
 ## Finishing
 

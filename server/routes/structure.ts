@@ -64,7 +64,7 @@ export function getEpoch(db: DB, id: number) {
 }
 
 /** True if `candidate` is `folderId` or one of its descendants. */
-function isDescendant(db: DB, folderId: number, candidate: number): boolean {
+export function isDescendant(db: DB, folderId: number, candidate: number): boolean {
   const row = db
     .prepare(
       `WITH RECURSIVE sub(id) AS (SELECT ? UNION ALL SELECT f.id FROM folders f JOIN sub ON f.parent_id = sub.id)
@@ -341,7 +341,7 @@ export function registerStructureRoutes(app: FastifyInstance, ctx: AppContext): 
         .all(pid),
       tasks: db
         .prepare(
-          `SELECT t.id, p.key || '-' || t.number AS key, t.title, t.status, t.type, t.folder_id AS folderId, t.epoch_id AS epochId
+          `SELECT t.id, p.key || '-' || t.number AS key, t.title, t.status, t.type, t.folder_id AS folderId, t.epoch_id AS epochId, t.parent_id AS parentId
            FROM tasks t JOIN projects p ON p.id = t.project_id WHERE t.project_id = ? ORDER BY t.sort_order, t.id`,
         )
         .all(pid),

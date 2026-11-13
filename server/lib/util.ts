@@ -7,17 +7,17 @@ export function parseId(raw: string, what = 'id'): number {
   return n;
 }
 
-/** Project keys: a letter, then up to 9 letters or digits ("T", "BH", "GAME2"). Stored upper-case. */
+/** Project keys: a letter, then up to 9 letters or digits ("T", "APP", "GAME2"). Stored upper-case. */
 export const PROJECT_KEY_RE = /^[A-Z][A-Z0-9]{0,9}$/;
 
 export type TaskRef = { id: number } | { key: string; number: number };
 
-/** A task reference: its database id ("57", as the web app uses) or its key ("BH-12", case-insensitive). */
+/** A task reference: its database id ("57", as the web app uses) or its key ("APP-12", case-insensitive). */
 export function parseTaskRef(raw: string): TaskRef {
   const s = String(raw).trim();
   if (/^\d+$/.test(s)) return { id: Number(s) };
   const m = /^([A-Za-z][A-Za-z0-9]{0,9})-(\d+)$/.exec(s);
-  if (!m) throw badRequest(`Invalid task reference "${raw}". Use a key like BH-12.`);
+  if (!m) throw badRequest(`Invalid task reference "${raw}". Use a key like APP-12.`);
   return { key: m[1].toUpperCase(), number: Number(m[2]) };
 }
 

@@ -19,6 +19,9 @@ interface Props {
 const openSheets: number[] = [];
 let nextSheetId = 1;
 
+/** Whether a sheet or dialog is open: page-wide shortcuts (Esc, Ctrl+A on the board) leave the keys to it. */
+export const isSheetOpen = () => openSheets.length > 0;
+
 /** The side panel's width on desktop, which people can drag (styles.css keeps it 80 px clear of the left edge). */
 const PANEL_WIDTH = { min: 420, max: 1200, initial: 640 };
 const PANEL_WIDTH_KEY = 'pm.sheet.width';
@@ -48,6 +51,9 @@ function trapFocus(e: KeyboardEvent, root: HTMLElement) {
 export function Sheet({ title, onClose, children, actions, variant = 'side', confirmClose }: Props) {
   const titleId = useId();
   const ref = useRef<HTMLDivElement>(null);
+  // Where the focus was before the sheet opened, to give it back on close. Read while rendering: by the time
+  // the mount effect runs, a field inside with autoFocus has already taken the focus.
+  const [opener] = useState(() => document.activeElement as HTMLElement | null);
   // Latest props without re-running the mount effect (which would steal focus on every render).
   const requestClose = useRef(() => {});
   const [width, setWidth] = useState(() => readWidth(PANEL_WIDTH_KEY, PANEL_WIDTH.min, PANEL_WIDTH.max) ?? PANEL_WIDTH.initial);
@@ -71,7 +77,6 @@ export function Sheet({ title, onClose, children, actions, variant = 'side', con
   useEffect(() => {
     const id = nextSheetId++;
     openSheets.push(id);
-    const previousFocus = document.activeElement as HTMLElement | null;
     // Focus the dialog itself rather than its first field, so phones don't pop the keyboard open.
     ref.current?.focus({ preventScroll: true });
     const onKey = (e: KeyboardEvent) => {
@@ -90,7 +95,7 @@ export function Sheet({ title, onClose, children, actions, variant = 'side', con
       window.removeEventListener('keydown', onKey);
       openSheets.splice(openSheets.indexOf(id), 1);
       document.body.style.overflow = prevOverflow;
-      if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
+      if (opener?.isConnected) opener.focus({ preventScroll: true });
     };
   }, []);
 

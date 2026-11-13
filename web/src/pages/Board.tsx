@@ -21,9 +21,11 @@ import { api, V1 } from '../api';
 import { tasksKey, useMeta, useTasks, type TaskFilters } from '../hooks';
 import { useProjectId } from '../projectContext';
 import { useMutate } from '../mutate';
+import { useTaskSelection } from '../selection';
 import type { Task } from '../types';
 import { cx } from '../util';
 import { readWidths, storeWidths, useResizeHandle } from '../resize';
+import { BulkBar } from '../components/BulkBar';
 import { FilterBar, useFilters } from '../components/Filters';
 import { PageHeader, useTaskParam } from '../components/Layout';
 import { TaskCard } from '../components/TaskCard';
@@ -136,26 +138,54 @@ export function BoardView({ scope = {} }: { scope?: TaskFilters }) {
     return map;
   }, [tasks, meta]);
 
-  /** Optimistically re-orders the cached list, then persists. */
-  const moveTask = async (task: Task, status: string, beforeId: number | null) => {
-    const col = (byStatus[status] ?? []).filter((t) => t.id !== task.id);
-    let order: number;
+  // Multi-select works in board order: column by column, top to bottom.
+  const ordered = useMemo(() => (meta?.statuses ?? []).flatMap((s) => (byStatus[s.id] ?? []).map((t) => t.id)), [byStatus, meta]);
+  const selection = useTaskSelection(ordered);
+  const selectedTasks = useMemo(() => {
+    const byId = new Map((tasks ?? []).map((t) => [t.id, t]));
+    return selection.ids.flatMap((id) => byId.get(id) ?? []);
+  }, [tasks, selection.ids]);
+  /** What a drag of `task` carries: the whole selection when the card is part of it. */
+  const dragGroup = (task: Task): Task[] => (selection.has(task.id) && selectedTasks.length > 1 ? selectedTasks : [task]);
+
+  /**
+   * Optimistically puts `group` (in that order) in `status`, before `beforeId` or at the end of the column,
+   * then saves: one card through its own move route, several in one bulk request.
+   */
+  const moveTasks = async (group: Task[], status: string, beforeId: number | null) => {
+    const moving = new Set(group.map((t) => t.id));
+    const col = (byStatus[status] ?? []).filter((t) => !moving.has(t.id));
     const idx = beforeId === null ? -1 : col.findIndex((t) => t.id === beforeId);
-    if (idx === -1) order = (col.at(-1)?.sortOrder ?? 0) + 1;
-    else order = idx === 0 ? col[0].sortOrder - 1 : (col[idx - 1].sortOrder + col[idx].sortOrder) / 2;
+    // Spread the cards evenly between their new neighbours.
+    const lo = idx === -1 ? (col.at(-1)?.sortOrder ?? 0) : idx === 0 ? col[0].sortOrder - 1 : col[idx - 1].sortOrder;
+    const hi = idx === -1 ? lo + 1 : col[idx].sortOrder;
+    const order = new Map(group.map((t, i) => [t.id, lo + ((hi - lo) * (i + 1)) / (group.length + 1)]));
     const label = meta?.statuses.find((s) => s.id === status)?.label ?? status;
-    // A refetch already in flight (e.g. from the previous move) would land after this and snap the card back.
+    // A refetch already in flight (e.g. from the previous move) would land after this and snap the cards back.
     await qc.cancelQueries({ queryKey: ['tasks'] });
     qc.setQueryData<Task[]>(queryKey, (old) =>
-      old?.map((t) => (t.id === task.id ? { ...t, status, statusLabel: label, sortOrder: order } : t)),
+      old?.map((t) => (order.has(t.id) ? { ...t, status, statusLabel: label, sortOrder: order.get(t.id)! } : t)),
     );
-    await mutate(() => api.post(`${V1}/tasks/${task.id}/move`, { status, beforeId }), ['tasks']);
+    await mutate(
+      () =>
+        group.length === 1
+          ? api.post(`${V1}/tasks/${group[0].id}/move`, { status, beforeId })
+          : api.post(`${V1}/tasks/bulk`, { action: 'move', ids: group.map((t) => t.id), status, beforeId }),
+      ['tasks'],
+    );
+  };
+
+  /** Whether `group` already sits together, in that order, in `status`, right before `beforeId` (null: last). */
+  const alreadyThere = (group: Task[], status: string, beforeId: number | null) => {
+    const col = (byStatus[status] ?? []).map((t) => t.id);
+    const first = col.indexOf(group[0].id);
+    return first !== -1 && group.every((t, i) => col[first + i] === t.id) && (col[first + group.length] ?? null) === beforeId;
   };
 
   const step = (task: Task, dir: -1 | 1) => {
     const list = meta?.statuses ?? [];
     const i = list.findIndex((s) => s.id === task.status) + dir;
-    if (i >= 0 && i < list.length) void moveTask(task, list[i].id, null);
+    if (i >= 0 && i < list.length) void moveTasks([task], list[i].id, null);
   };
 
   const onDragStart = (e: DragStartEvent) => setDragging((e.active.data.current?.task as Task) ?? null);
@@ -168,26 +198,25 @@ export function BoardView({ scope = {} }: { scope?: TaskFilters }) {
     const task = e.active.data.current?.task as Task | undefined;
     const overId = e.over?.id ? String(e.over.id) : null;
     if (!task || !overId) return;
+    const group = dragGroup(task);
+    const moving = new Set(group.map((t) => t.id));
+    let status: string;
+    let beforeId: number | null;
     if (overId.startsWith('before-')) {
       const targetId = Number(overId.slice(7));
-      if (targetId === task.id) return;
       const target = tasks?.find((t) => t.id === targetId);
       if (!target) return;
-      // Dropped on the lower half of a card: insert after it (before the next card, or at the end).
-      const below = isLowerHalf(e);
-      const col = (byStatus[target.status] ?? []).filter((t) => t.id !== task.id);
-      const beforeId = below ? (col[col.findIndex((t) => t.id === targetId) + 1]?.id ?? null) : targetId;
-      // Already exactly there? Skip the request.
-      const current = byStatus[task.status] ?? [];
-      const nextInCurrent = current[current.findIndex((t) => t.id === task.id) + 1]?.id ?? null;
-      if (task.status === target.status && beforeId === nextInCurrent) return;
-      void moveTask(task, target.status, beforeId);
-    } else if (overId.startsWith('col-')) {
-      const status = overId.slice(4);
+      status = target.status;
+      // Dropped on the lower half of a card: insert after it. Either way, before the first card from there
+      // on that isn't being moved (or at the end).
       const col = byStatus[status] ?? [];
-      if (task.status === status && col.at(-1)?.id === task.id) return;
-      void moveTask(task, status, null);
-    }
+      const from = col.findIndex((t) => t.id === targetId) + (isLowerHalf(e) ? 1 : 0);
+      beforeId = col.slice(from).find((t) => !moving.has(t.id))?.id ?? null;
+    } else if (overId.startsWith('col-')) {
+      status = overId.slice(4);
+      beforeId = null;
+    } else return;
+    if (!alreadyThere(group, status, beforeId)) void moveTasks(group, status, beforeId);
   };
 
   if (!meta || isLoading) return <Spinner />;
@@ -195,35 +224,54 @@ export function BoardView({ scope = {} }: { scope?: TaskFilters }) {
   // First visit on this device: open the first column that has work in it.
   const activeCol = mobileCol ?? meta.statuses.find((s) => byStatus[s.id]?.length)?.id ?? meta.statuses[0].id;
 
+  // The cards a drag carries look picked up; the overlay under the pointer says how many there are.
+  const carried = dragging ? new Set(dragGroup(dragging).map((t) => t.id)) : null;
+
   return (
     <>
-      <div className="col-tabs">
-        {meta.statuses.map((s) => {
-          const on = activeCol === s.id;
-          return (
-            <button key={s.id} className={cx('col-tab', on && 'on')} style={on ? { background: s.color, borderColor: s.color } : { borderColor: s.color + '88' }}
-              onClick={() => setMobileCol(s.id)}>
-              {s.label} <span className="count">{byStatus[s.id]?.length ?? 0}</span>
-            </button>
-          );
-        })}
+      {/* Phones: one column at a time, picked here; Select turns on tap-to-select (no hover or Ctrl there). */}
+      <div className="board-top hide-desktop">
+        <div className="col-tabs">
+          {meta.statuses.map((s) => {
+            const on = activeCol === s.id;
+            return (
+              <button key={s.id} className={cx('col-tab', on && 'on')} style={on ? { background: s.color, borderColor: s.color } : { borderColor: s.color + '88' }}
+                onClick={() => setMobileCol(s.id)}>
+                {s.label} <span className="count">{byStatus[s.id]?.length ?? 0}</span>
+              </button>
+            );
+          })}
+        </div>
+        <button type="button" className={cx('btn btn-sm select-toggle', selection.mode && 'on')} aria-pressed={selection.mode}
+          onClick={() => (selection.mode ? selection.clear() : selection.setMode(true))}>
+          Select
+        </button>
       </div>
       <DndContext sensors={sensors} collisionDetection={boardCollision} onDragStart={onDragStart} onDragMove={onDragMove} onDragEnd={onDragEnd} onDragCancel={() => setDragging(null)}>
-        <div className="board">
+        <div className={cx('board', selection.active && 'selecting')}>
           {meta.statuses.map((s) => (
             <Column key={s.id} id={s.id} label={s.label} color={s.color} count={byStatus[s.id]?.length ?? 0} mobileHidden={activeCol !== s.id}
               width={columnWidths[s.id]} onResize={(px) => resizeColumn(s.id, px)} onAdd={() => setAddingIn(s.id)}>
               {(byStatus[s.id] ?? []).map((t) => (
-                <DraggableCard key={t.id} task={t} isDragging={dragging?.id === t.id} dropAfter={dropAfter}>
-                  <TaskCard task={t} onOpen={openTask} onStep={step} onMove={setMoving} hideEpoch={oneEpoch} />
+                <DraggableCard key={t.id} task={t} isDragging={carried?.has(t.id) ?? false} dropAfter={dropAfter}>
+                  <TaskCard task={t} onOpen={openTask} onStep={step} onMove={setMoving} hideEpoch={oneEpoch}
+                    select={{ selected: selection.has(t.id), tapSelects: selection.mode, onToggle: (range) => selection.toggle(t.id, range) }} />
                 </DraggableCard>
               ))}
             </Column>
           ))}
         </div>
-        <DragOverlay>{dragging && <TaskCard task={dragging} onOpen={() => {}} className="drag-overlay" hideEpoch={oneEpoch} />}</DragOverlay>
+        <DragOverlay>
+          {dragging && carried && (
+            <div className={cx('drag-stack', carried.size > 1 && 'many')}>
+              <TaskCard task={dragging} onOpen={() => {}} className="drag-overlay" hideEpoch={oneEpoch} />
+              {carried.size > 1 && <span className="drag-count" aria-hidden>+{carried.size - 1}</span>}
+            </div>
+          )}
+        </DragOverlay>
       </DndContext>
-      {moving && <StatusPicker current={moving.status} onClose={() => setMoving(null)} onPick={(s) => moveTask(moving, s, null)} />}
+      <BulkBar selection={selection} tasks={selectedTasks} total={ordered.length} />
+      {moving && <StatusPicker current={moving.status} onClose={() => setMoving(null)} onPick={(s) => moveTasks([moving], s, null)} />}
       {addingIn && (
         <QuickAdd onClose={() => setAddingIn(null)} defaults={{ status: addingIn, epochId: scope.epoch ? Number(scope.epoch) : null }} onCreated={openTask} />
       )}

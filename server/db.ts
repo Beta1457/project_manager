@@ -229,6 +229,26 @@ const MIGRATIONS: string[] = [
   CREATE INDEX files_project ON files(project_id, folder_id);
   CREATE INDEX diagrams_project ON diagrams(project_id);
   `,
+  // v6: sub-tasks. A task can have one parent in its own project, one level deep (both enforced in the API).
+  // Deleting a parent leaves its sub-tasks as top-level tasks, unless the API is asked to delete them too.
+  `
+  ALTER TABLE tasks ADD COLUMN parent_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL;
+  CREATE INDEX tasks_parent ON tasks(parent_id);
+  `,
+  // v7: task templates, per project. The data column is JSON: the task's fields and its sub-tasks, with types,
+  // categories and epochs by name (looked up when the template is used).
+  `
+  CREATE TABLE task_templates (
+    id INTEGER PRIMARY KEY,
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    name TEXT NOT NULL COLLATE NOCASE,
+    data TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT ${NOW},
+    updated_at TEXT NOT NULL DEFAULT ${NOW},
+    UNIQUE (project_id, name)
+  );
+  `,
 ];
 
 /** Gives the data from before projects existed to the first user, as a project with the key "T". */

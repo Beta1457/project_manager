@@ -10,6 +10,7 @@ export type ChangeKind =
   | 'types'
   | 'diagrams'
   | 'time'
+  | 'templates'
   | 'projects';
 
 export interface ChangeEvent {

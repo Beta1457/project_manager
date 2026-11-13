@@ -1,7 +1,8 @@
 /**
  * Fills an EMPTY data folder with generic demo content, for trying the app, checking changes on a
  * scratch server and taking README screenshots: an account, a project with folders, epochs, tasks
- * (statuses, checklists, links, comments, logged time), a document and an architecture diagram.
+ * (statuses, checklists, links, comments, logged time, sub-tasks in other epochs), task templates,
+ * documents (one showing an image) and architecture diagrams.
  *
  * It never touches real data: it stops unless PM_DATA_DIR names a folder that has no database yet.
  *
@@ -68,6 +69,50 @@ async function call(method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE', url: st
   });
   if (res.statusCode >= 400) fail(`${method} ${url} failed (HTTP ${res.statusCode}): ${res.body}`);
   return res.body ? (JSON.parse(res.body) as Json) : {};
+}
+
+/** Uploads one file into a folder, the way the web app's Upload button does. */
+async function upload(folderId: number, filename: string, data: string, type: string): Promise<Json> {
+  const boundary = '----demo-seed';
+  const res = await app.inject({
+    method: 'POST',
+    url: '/api/v1/files',
+    headers: {
+      cookie,
+      'x-pm-client': 'web',
+      'x-pm-project': String(projectId),
+      'content-type': `multipart/form-data; boundary=${boundary}`,
+    },
+    payload:
+      `--${boundary}\r\nContent-Disposition: form-data; name="folderId"\r\n\r\n${folderId}\r\n` +
+      `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: ${type}\r\n\r\n${data}\r\n--${boundary}--\r\n`,
+  });
+  if (res.statusCode >= 400) fail(`uploading ${filename} failed (HTTP ${res.statusCode}): ${res.body}`);
+  return (JSON.parse(res.body) as Json).files[0] as Json;
+}
+
+/** A rough side view of a level, drawn as an SVG so the seed needs no image files. */
+function levelSketch(): string {
+  const label = (x: number, y: number, text: string) => `<text x="${x}" y="${y}" text-anchor="middle">${text}</text>`;
+  const flag = (x: number, top: number, color: string) =>
+    `<path d="M${x} 200V${top}" stroke="#334155" stroke-width="3"/><path d="M${x} ${top}l26 8-26 8Z" fill="${color}"/>`;
+  return [
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 240" font-family="sans-serif" font-size="13" fill="#334155">',
+    '<rect width="640" height="240" fill="#e0f2fe"/>',
+    '<path d="M0 200H170V240H0ZM230 200H400V240H230ZM470 200H640V240H470Z" fill="#65a30d"/>',
+    '<rect x="405" y="120" width="70" height="12" rx="3" fill="#a16207"/>',
+    '<rect x="40" y="168" width="20" height="32" rx="4" fill="#7c3aed"/>',
+    flag(255, 150, '#f59e0b'),
+    '<rect x="320" y="176" width="28" height="24" rx="6" fill="#dc2626"/>',
+    '<path d="M300 160h-24m0 0 6-4m-6 4 6 4M368 160h24m0 0-6-4m6 4-6 4" stroke="#dc2626" stroke-width="2" fill="none"/>',
+    flag(600, 140, '#16a34a'),
+    label(50, 158, 'Start'),
+    label(262, 140, 'Checkpoint'),
+    label(334, 164, 'Patrol'),
+    label(440, 110, 'Shortcut'),
+    label(610, 130, 'Goal'),
+    '</svg>',
+  ].join('\n');
 }
 
 // ---- Folders and epochs --------------------------------------------------
@@ -176,6 +221,51 @@ await call('POST', `/api/v1/tasks/${tasks.sprites.id}/links`, { task: tasks.tile
 await call('POST', `/api/v1/tasks/${tasks.enemies.id}/comments`, { message: 'Patrol paths work. Next: losing track of the player behind walls.' });
 await call('POST', `/api/v1/tasks/${tasks.pauseCrash.id}/comments`, { message: 'Only happens when the cutscene has audio playing.' });
 
+// Sub-tasks: a boss fight whose art and audio are made in their own epochs.
+const boss = await call('POST', '/api/v1/tasks', {
+  title: 'Boss: Forest Guardian',
+  type: 'Content',
+  priority: 'high',
+  epochId: slice.id,
+  categories: ['Gameplay'],
+  estimate: '12h',
+  description: 'The slice ends with this fight. Three phases; the arena floor breaks up in the last one.',
+});
+const bossParts: Array<[string, string, Json, string, string]> = [
+  ['Guardian attack patterns', 'Feature', slice, 'in_progress', 'Gameplay'],
+  ['Guardian sprites and animations', 'Art', artPass, 'alpha_complete', 'Art'],
+  ['Guardian roar and hit sounds', 'Audio', audioPass, 'open', 'Audio'],
+];
+for (const [title, type, epoch, status, category] of bossParts) {
+  await call('POST', '/api/v1/tasks', { title, type, status, epochId: epoch.id, categories: [category], parent: boss.id });
+}
+
+// Templates: a boss fight like the one above (its art and audio in their own epochs), and a bug report.
+await call('POST', '/api/v1/templates', {
+  name: 'Boss fight',
+  title: 'Boss: {title}',
+  type: 'Content',
+  priority: 'high',
+  epoch: 'Vertical slice',
+  categories: ['Gameplay'],
+  estimate: '12h',
+  description: 'Phases, arena and reward for {title}.',
+  checklist: ['Sketch the phases', 'Block out the arena', 'Playtest'],
+  subtasks: [
+    { title: '{title}: attack patterns', type: 'Feature', categories: ['Gameplay'], estimate: '6h' },
+    { title: '{title}: sprites and animations', type: 'Art', epoch: 'Art pass', categories: ['Art'], estimate: '8h' },
+    { title: '{title}: sounds', type: 'Audio', epoch: 'Audio pass', categories: ['Audio'], estimate: '2h' },
+  ],
+});
+await call('POST', '/api/v1/templates', {
+  name: 'Bug report',
+  title: 'Bug: {title}',
+  type: 'Bug',
+  priority: 'high',
+  description: '**Steps to reproduce**\n\n1. \n\n**Expected**\n\n**What happens instead**\n',
+  checklist: ['Reproduce it', 'Write a test that fails', 'Fix it and run the tests'],
+});
+
 await call('POST', '/api/v1/time', { taskId: tasks.movement.id, minutes: 330, note: 'Controls and tuning' });
 await call('POST', '/api/v1/time', { taskId: tasks.enemies.id, minutes: 150, note: 'Waypoints and detection' });
 await call('POST', '/api/v1/time', { taskId: tasks.sprites.id, minutes: 95, note: 'Idle and run cycles' });
@@ -196,6 +286,23 @@ await call('POST', '/api/v1/docs', {
     '- **Responsive controls**: every jump feels fair.',
     '- **Readable enemies**: you can always tell what an enemy is about to do.',
     '- **Short levels**: each one takes two to four minutes.',
+    '',
+  ].join('\n'),
+});
+
+// SVGs are shown through /render (as /content they come back as text).
+const sketch = await upload(levels.id, 'Level 1 sketch.svg', levelSketch(), 'image/svg+xml');
+await call('POST', '/api/v1/docs', {
+  name: 'Level 1.md',
+  folderId: levels.id,
+  content: [
+    '# Level 1: The woods',
+    '',
+    `![Level 1 sketch](/api/v1/files/${sketch.id}/render)`,
+    '',
+    '- Teaches running and jumping, then one patrolling enemy.',
+    '- The checkpoint comes before the enemy, so a failed jump costs little.',
+    '- A ledge above the second gap leads to a shortcut.',
     '',
   ].join('\n'),
 });
@@ -236,7 +343,7 @@ const rnd = seeded(7);
 const pick = <T>(items: T[]): T => items[Math.floor(rnd() * items.length)];
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-');
 
-// Nested: 30 systems (groups) of 10 classes each, with sizes, paths and roles.
+// Nested: 30 systems (groups) of 10 classes each, with sizes, paths and roles, laid out left to right.
 const SYSTEMS: Array<[string, string]> = [
   ['Rendering', 'core'], ['Physics', 'core'], ['Input', 'core'], ['Camera', 'core'], ['Animation', 'core'], ['Lighting', 'core'], ['Shaders', 'core'],
   ['Combat', 'gameplay'], ['Enemy AI', 'gameplay'], ['Pathfinding', 'gameplay'], ['Quests', 'gameplay'], ['Inventory', 'gameplay'],
@@ -309,7 +416,7 @@ for (const [name, layer] of SYSTEMS) {
 nestedEdges.push({ source: 'sys-combat', target: 'sys-physics', label: 'queries', count: 64 });
 nestedEdges.push({ source: 'sys-rendering', target: 'sys-shaders', label: 'compiles', count: 40 });
 const nested = await call('POST', '/api/v1/diagrams', { name: 'Engine systems (nested)' });
-await call('POST', `/api/v1/diagrams/${nested.id}/import`, { mode: 'replace', nodes: nestedNodes, edges: nestedEdges });
+await call('POST', `/api/v1/diagrams/${nested.id}/import`, { mode: 'replace', nodes: nestedNodes, edges: nestedEdges, settings: { direction: 'RIGHT' } });
 
 // Flat: 650 boxes in 7 layers and 1200 arrows, no groups of its own (it opens folded into its layers).
 const LAYERS = ['core', 'gameplay', 'ui', 'data', 'services', 'tools', 'external'];

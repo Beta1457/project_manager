@@ -1,2 +1,4 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+# Screenshots: never touch line endings or show text diffs
+*.png binary

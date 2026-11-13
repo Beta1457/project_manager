@@ -1,13 +1,13 @@
-import { useEffect, useRef, useState, type MouseEvent } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useEffect, useRef, useState, type FormEvent, type MouseEvent } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { api, V1 } from '../api';
 import { useEpochs, useFolders, useMeta, useTask, type TaskRef } from '../hooks';
 import { useProject } from '../projectContext';
 import { useToast } from './Toast';
 import { useMutate } from '../mutate';
 import { useTaskParam } from '../taskParam';
-import type { Task, TaskDetail } from '../types';
-import { clip, formatMinutes, joinAnd, timeAgo } from '../util';
+import type { TaskDetail } from '../types';
+import { clip, formatMinutes, joinAnd, plural, timeAgo } from '../util';
 import { useUndoableDelete } from '../undoableDelete';
 import { Markdown, Spinner, StatusPill } from './Bits';
 import { askConfirm } from './Confirm';
@@ -15,6 +15,8 @@ import { folderPath } from './Filters';
 import { Sheet } from './Sheet';
 import { TimePanel } from './TimePanel';
 import { MarkdownEditor } from './MarkdownEditor';
+import { TaskSearch } from './TaskSearch';
+import { SaveAsTemplate } from './Templates';
 
 const K = ['tasks'];
 
@@ -37,11 +39,22 @@ export function TaskSheet({ id, onClose }: { id: TaskRef; onClose: () => void })
     toast(`Switched to ${other.name}`);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [elsewhere, projects]);
+  const [saving, setSaving] = useState(false);
   return (
+    <>
     <Sheet
       title={task ? <span><span className="key">{task.key}</span> {task.title}</span> : 'Task'}
       onClose={onClose}
-      actions={task && <DeleteButton task={task} onDone={onClose} />}
+      actions={
+        task && (
+          <>
+            <button className="btn btn-ghost btn-sm" onClick={() => setSaving(true)} title="Start new tasks from a copy of this one">
+              Save as template
+            </button>
+            <DeleteButton task={task} onDone={onClose} />
+          </>
+        )
+      }
     >
       {/* Keyed by id: following a link to another task must not carry this task's unsaved edits across. */}
       {error ? (
@@ -52,23 +65,43 @@ export function TaskSheet({ id, onClose }: { id: TaskRef; onClose: () => void })
         <Spinner />
       )}
     </Sheet>
+    {saving && task && <SaveAsTemplate task={task} onClose={() => setSaving(false)} />}
+    </>
   );
 }
 
 function DeleteButton({ task, onDone }: { task: TaskDetail; onDone: () => void }) {
   const mutate = useMutate();
+  const toast = useToast();
   return (
     <button
       className="btn btn-ghost btn-danger btn-sm"
       onClick={async () => {
         const goes = ['checklist', 'comments', 'links'];
         if (task.loggedMinutes > 0) goes.push(`${formatMinutes(task.loggedMinutes)} of logged time`);
-        const ok = await askConfirm({
-          title: `Delete ${task.key}?`,
-          body: `"${task.title}" will be deleted, along with its ${joinAnd(goes)}. This can't be undone.`,
-          confirmLabel: 'Delete task',
-        });
-        if (ok && (await mutate(() => api.del(`${V1}/tasks/${task.id}`), K, 'Task deleted'))) onDone();
+        const body = `"${task.title}" will be deleted, along with its ${joinAnd(goes)}. This can't be undone.`;
+        const n = task.subtasks.total;
+        let url = `${V1}/tasks/${task.id}`;
+        if (n > 0) {
+          const answer = await askConfirm({
+            title: `Delete ${task.key}?`,
+            body: (
+              <>
+                <p>{body}</p>
+                <p>Its {plural(n, 'sub-task')} will stay, as top-level tasks, unless you tick the box.</p>
+              </>
+            ),
+            confirmLabel: 'Delete task',
+            checkbox: `Also delete its ${plural(n, 'sub-task')}`,
+          });
+          if (!answer.ok) return;
+          if (answer.checked) url += '?withSubtasks=true';
+        } else if (!(await askConfirm({ title: `Delete ${task.key}?`, body, confirmLabel: 'Delete task' }))) return;
+        const done = await mutate(() => api.del<{ deleted: number }>(url), K);
+        if (done) {
+          toast(done.deleted > 1 ? `Deleted ${plural(done.deleted, 'task')}` : 'Task deleted');
+          onDone();
+        }
       }}
     >
       Delete
@@ -187,6 +220,7 @@ function TaskBody({ task }: { task: TaskDetail }) {
           by {task.createdBy} · {timeAgo(task.createdAt)} · updated {timeAgo(task.updatedAt)}
         </span>
       </div>
+      <ParentRow task={task} onPatch={patch} />
 
       <div className="prop-grid">
         <label className="field">
@@ -303,6 +337,8 @@ function TaskBody({ task }: { task: TaskDetail }) {
         </form>
       </div>
 
+      {!task.parent && <SubtasksSection task={task} />}
+
       <LinksSection task={task} />
 
       <div className="tabs">
@@ -332,8 +368,8 @@ function TaskBody({ task }: { task: TaskDetail }) {
                 <div className="tiny muted">
                   <strong>{a.actor}</strong> · {a.kind} · {timeAgo(a.createdAt)}
                 </div>
-                {/* Notes are markdown; link entries go through it too so their task keys are clickable. */}
-                <div className="msg">{a.kind === 'comment' || a.kind === 'link' ? <Markdown text={a.message} /> : a.message}</div>
+                {/* Notes are markdown; link and sub-task entries go through it too so their task keys are clickable. */}
+                <div className="msg">{a.kind === 'comment' || a.kind === 'link' || a.kind === 'subtask' ? <Markdown text={a.message} /> : a.message}</div>
               </div>
             ))}
           </div>
@@ -351,13 +387,143 @@ const LINK_KINDS = [
   { value: 'duplicated_by', label: 'is duplicated by' },
 ];
 
-function useDebounced<T>(value: T, ms: number): T {
-  const [v, setV] = useState(value);
-  useEffect(() => {
-    const t = window.setTimeout(() => setV(value), ms);
-    return () => window.clearTimeout(t);
-  }, [value, ms]);
-  return v;
+/** Opens a task in this sheet; Ctrl/Cmd/Shift-click opens it in a new browser tab instead. */
+function useOpenTask() {
+  const [, openTask] = useTaskParam();
+  return (e: MouseEvent, id: number) => {
+    if (e.ctrlKey || e.metaKey || e.shiftKey) return; // let the browser open a new tab
+    e.preventDefault();
+    openTask(id);
+  };
+}
+
+/** Which task this one is a sub-task of: open it, change it, detach. Top-level tasks with sub-tasks can't have one. */
+function ParentRow({ task, onPatch }: { task: TaskDetail; onPatch: (body: Record<string, unknown>) => Promise<unknown> }) {
+  const open = useOpenTask();
+  const [picking, setPicking] = useState(false);
+  if (!task.parent && task.subtasks.total > 0) return null;
+  return (
+    <div>
+      <div className="parent-row small">
+        <span className="muted">Parent</span>
+        {task.parent ? (
+          <a className="grow ellipsis" href={`?task=${task.parent.id}`} onClick={(e) => open(e, task.parent!.id)}>
+            <span className="key">{task.parent.key}</span> {task.parent.title}
+          </a>
+        ) : (
+          <span className="grow muted">None (a top-level task)</span>
+        )}
+        {!picking && (
+          <button className="btn btn-sm" onClick={() => setPicking(true)}>
+            {task.parent ? 'Change' : 'Make sub-task of…'}
+          </button>
+        )}
+        {task.parent && !picking && (
+          <button className="btn btn-ghost btn-sm" onClick={() => void onPatch({ parent: null })} title="Make it a top-level task">
+            Detach
+          </button>
+        )}
+      </div>
+      {picking && (
+        <TaskSearch
+          label="Find the parent task"
+          params={{ parent: 'none' }}
+          exclude={(t) => t.id === task.id || t.id === task.parentId}
+          excludedHint="that can be its parent"
+          onPick={async (t) => {
+            if (await onPatch({ parent: t.id })) setPicking(false);
+          }}
+          onCancel={() => setPicking(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+/** A top-level task's sub-tasks: open one, change its status, add new ones or move existing tasks under it. */
+function SubtasksSection({ task }: { task: TaskDetail }) {
+  const mutate = useMutate();
+  const meta = useMeta().data;
+  const epochs = useEpochs().data ?? [];
+  const open = useOpenTask();
+  const [mode, setMode] = useState<'idle' | 'new' | 'existing'>('idle');
+  const [title, setTitle] = useState('');
+  // New sub-tasks start in the parent's epoch; pick another for work that belongs elsewhere (VFX, SFX...).
+  const [epochId, setEpochId] = useState(task.epochId ? String(task.epochId) : '');
+  const { done, total } = task.subtasks;
+
+  const add = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!title.trim()) return;
+    const body = { title: title.trim(), parent: task.id, epochId: epochId ? Number(epochId) : null, folderId: epochId ? null : task.folderId };
+    if (await mutate(() => api.post(`${V1}/tasks`, body), K, 'Sub-task added')) setTitle('');
+  };
+
+  return (
+    <div>
+      <div className="row" style={{ justifyContent: 'space-between' }}>
+        <div className="section-title">Sub-tasks {total > 0 && `(${done}/${total} done)`}</div>
+        {mode === 'idle' && (
+          <div className="row" style={{ gap: 6 }}>
+            <button className="btn btn-sm" onClick={() => setMode('existing')}>Add existing…</button>
+            <button className="btn btn-sm" onClick={() => setMode('new')}>+ Sub-task</button>
+          </div>
+        )}
+      </div>
+      {task.children.map((c) => (
+        <div key={c.id} className="link-row subtask-row">
+          <a className="grow ellipsis" href={`?task=${c.id}`} onClick={(e) => open(e, c.id)}>
+            <span className="key">{c.key}</span> {c.title}
+          </a>
+          {c.epochName && c.epochId !== task.epochId && (
+            <span className="tiny muted ellipsis subtask-epoch" title={`Epoch: ${c.epochName}`}>◆ {c.epochName}</span>
+          )}
+          <select
+            className="subtask-status"
+            value={c.status}
+            aria-label={`Status of ${c.key}`}
+            onChange={(e) => void mutate(() => api.post(`${V1}/tasks/${c.id}/status`, { status: e.target.value }), K)}
+          >
+            {meta?.statuses.map((s) => (
+              <option key={s.id} value={s.id}>{s.label}</option>
+            ))}
+          </select>
+        </div>
+      ))}
+      {mode === 'new' && (
+        <form className="link-add stack" style={{ gap: 6 }} onSubmit={add}>
+          <div className="row nowrap">
+            <input autoFocus value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Sub-task title" aria-label="Sub-task title" />
+            <select value={epochId} onChange={(e) => setEpochId(e.target.value)} aria-label="Epoch of the sub-task" style={{ width: 'auto', maxWidth: '40%' }}>
+              <option value="">No epoch</option>
+              {epochs.map((ep) => (
+                <option key={ep.id} value={ep.id}>◆ {ep.name}</option>
+              ))}
+            </select>
+          </div>
+          <div className="row">
+            <button type="submit" className="btn btn-primary btn-sm" disabled={!title.trim()}>Add sub-task</button>
+            <button type="button" className="btn btn-ghost btn-sm" onClick={() => { setMode('idle'); setTitle(''); }}>Done</button>
+          </div>
+        </form>
+      )}
+      {mode === 'existing' && (
+        <TaskSearch
+          label="Find a task to make a sub-task"
+          params={{ parent: 'none' }}
+          exclude={(t) => t.id === task.id || t.subtasks.total > 0}
+          excludedHint="that can become a sub-task"
+          onPick={async (t) => {
+            if (await mutate(() => api.patch(`${V1}/tasks/${t.id}`, { parent: task.id }), K, `${t.key} is now a sub-task`)) setMode('idle');
+          }}
+          onCancel={() => setMode('idle')}
+        />
+      )}
+      {mode === 'idle' && total === 0 && (
+        <div className="tiny muted">No sub-tasks. Use them for parts of the work that move across the board on their own or belong in another epoch.</div>
+      )}
+    </div>
+  );
 }
 
 /** Links to other tasks: list (click to open), remove, and add by searching title or key. */
@@ -366,37 +532,13 @@ function LinksSection({ task }: { task: TaskDetail }) {
   const undoable = useUndoableDelete();
   const linkUrl = (otherId: number) => `${V1}/tasks/${task.id}/links/${otherId}`;
   const links = task.links.filter((l) => !undoable.isHidden(linkUrl(l.task.id)));
-  const [, openTask] = useTaskParam();
-  const { project } = useProject();
+  const open = useOpenTask();
   const [adding, setAdding] = useState(false);
   const [kind, setKind] = useState('relates');
-  const [q, setQ] = useState('');
-  const term = useDebounced(q.trim(), 250);
-  // A bare number means a task key ("12" → APP-12); anything else searches titles and descriptions.
   // Only tasks in the same project can be linked, so the search stays in this project.
-  const query = /^\d+$/.test(term) ? `${project.key}-${term}` : term;
-  const search = useQuery({
-    queryKey: ['task-search', project.id, query],
-    queryFn: () =>
-      api
-        .get<{ tasks: Task[] }>(`${V1}/tasks?${new URLSearchParams({ q: query, summary: '1', limit: '8' })}`, project.id)
-        .then((r) => r.tasks),
-    enabled: adding && query.length > 0,
-  });
   const linked = new Set(task.links.map((l) => l.task.id));
-  const results = (search.data ?? []).filter((t) => t.id !== task.id && !linked.has(t.id));
-
-  const add = async (other: Task) => {
-    const ok = await mutate(() => api.post(`${V1}/tasks/${task.id}/links`, { task: other.id, kind }), K, `Linked ${other.key}`);
-    if (ok) {
-      setQ('');
-      setAdding(false);
-    }
-  };
-  const open = (e: MouseEvent, id: number) => {
-    if (e.ctrlKey || e.metaKey || e.shiftKey) return; // let the browser open a new tab
-    e.preventDefault();
-    openTask(id);
+  const add = async (other: { id: number; key: string }) => {
+    if (await mutate(() => api.post(`${V1}/tasks/${task.id}/links`, { task: other.id, kind }), K, `Linked ${other.key}`)) setAdding(false);
   };
 
   return (
@@ -427,45 +569,20 @@ function LinksSection({ task }: { task: TaskDetail }) {
         </div>
       ))}
       {adding && (
-        <div className="link-add stack" style={{ gap: 6 }}>
-          <div className="row nowrap">
+        <TaskSearch
+          label="Find a task to link"
+          before={
             <select value={kind} onChange={(e) => setKind(e.target.value)} aria-label="Link type" style={{ width: 'auto' }}>
               {LINK_KINDS.map((k) => (
                 <option key={k.value} value={k.value}>{k.label}</option>
               ))}
             </select>
-            <input
-              autoFocus
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && results[0]) {
-                  e.preventDefault();
-                  void add(results[0]);
-                }
-              }}
-              placeholder={`Search by title or key (${project.key}-12)`}
-              aria-label="Find a task to link"
-            />
-            <button className="btn btn-ghost btn-sm" onClick={() => { setAdding(false); setQ(''); }}>Cancel</button>
-          </div>
-          {query && (
-            <div className="link-results">
-              {search.isFetching && !search.data ? (
-                <div className="tiny muted">Searching…</div>
-              ) : results.length ? (
-                results.map((t) => (
-                  <button key={t.id} className="link-result" onClick={() => void add(t)}>
-                    <span className="key">{t.key}</span> <span className="grow ellipsis">{t.title}</span>
-                    <StatusPill status={t.status} label={t.statusLabel} />
-                  </button>
-                ))
-              ) : (
-                <div className="tiny muted">No matching tasks{search.data?.length ? ' that aren’t already linked' : ''}.</div>
-              )}
-            </div>
-          )}
-        </div>
+          }
+          exclude={(t) => t.id === task.id || linked.has(t.id)}
+          excludedHint="that aren’t already linked"
+          onPick={(t) => void add(t)}
+          onCancel={() => setAdding(false)}
+        />
       )}
       {!adding && task.links.length === 0 && <div className="tiny muted">No links yet. Link tasks that block, duplicate or relate to this one.</div>}
     </div>

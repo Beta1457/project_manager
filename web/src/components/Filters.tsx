@@ -4,7 +4,7 @@ import type { TaskFilters } from '../hooks';
 import { useEpochs, useFolders, useMeta } from '../hooks';
 import { Sheet } from './Sheet';
 
-const KEYS: Array<keyof TaskFilters> = ['q', 'status', 'type', 'category', 'priority', 'epoch', 'folder', 'createdBy'];
+const KEYS: Array<keyof TaskFilters> = ['q', 'status', 'type', 'category', 'priority', 'epoch', 'folder', 'createdBy', 'parent'];
 
 /** Filters live in the URL so filtered views can be bookmarked and shared. */
 export function useFilters(): [TaskFilters, (patch: Partial<TaskFilters>) => void, () => void] {
@@ -91,6 +91,7 @@ export function FilterBar({ hide = [] }: { hide?: Array<keyof TaskFilters> }) {
   if (filters.folder)
     active.push({ key: 'folder', label: filters.folder === 'inbox' ? 'Inbox' : `Folder: ${folders.find((f) => String(f.id) === filters.folder)?.name ?? filters.folder}` });
   if (filters.createdBy) active.push({ key: 'createdBy', label: `By ${filters.createdBy}` });
+  if (filters.parent === 'none') active.push({ key: 'parent', label: 'Sub-tasks hidden' });
 
   const remove = (key: keyof TaskFilters, label: string) => {
     if (key === 'status' || key === 'type' || key === 'category' || key === 'priority') {
@@ -196,6 +197,10 @@ export function FilterBar({ hide = [] }: { hide?: Array<keyof TaskFilters> }) {
                 <input value={createdBy} onChange={(e) => setCreatedBy(e.target.value)} placeholder="e.g. claude" />
               </label>
             </div>
+            <label className="row nowrap small">
+              <input type="checkbox" checked={filters.parent === 'none'} onChange={(e) => update({ parent: e.target.checked ? 'none' : '' })} />
+              Hide sub-tasks (show top-level tasks only)
+            </label>
             <button className="btn btn-primary" onClick={() => setOpen(false)}>Done</button>
           </div>
         </Sheet>

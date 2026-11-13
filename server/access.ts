@@ -25,7 +25,7 @@ export interface ProjectRow {
 export const PROJECT_HEADER = 'x-pm-project';
 
 /** Tables whose rows carry a project_id. */
-export type ProjectTable = 'tasks' | 'epochs' | 'folders' | 'files' | 'diagrams' | 'categories';
+export type ProjectTable = 'tasks' | 'epochs' | 'folders' | 'files' | 'diagrams' | 'categories' | 'task_templates';
 
 export interface TaskTarget {
   id: number;
@@ -50,7 +50,7 @@ export function createAccess(db: DB) {
   const mine = (userId: number): ProjectRow[] =>
     db.prepare('SELECT * FROM projects WHERE owner_id = ? ORDER BY id').all(userId) as unknown as ProjectRow[];
 
-  /** A project by id or key ("BH"), if the caller owns it. */
+  /** A project by id or key ("APP"), if the caller owns it. */
   const project = (req: FastifyRequest, ref: string | number): ProjectRow => {
     const s = String(ref).trim();
     const row = (/^\d+$/.test(s) ? byId.get(Number(s)) : byKey.get(s)) as ProjectRow | undefined;
@@ -89,7 +89,7 @@ export function createAccess(db: DB) {
     if (!db.prepare(`SELECT 1 FROM ${table} WHERE id = ? AND project_id = ?`).get(id, projectId)) throw notFound(label);
   };
 
-  /** Resolves a task id or key ("BH-12") the caller may see. */
+  /** Resolves a task id or key ("APP-12") the caller may see. */
   const task = (req: FastifyRequest, raw: string | number): TaskTarget => {
     const ref = parseTaskRef(String(raw));
     const row = (

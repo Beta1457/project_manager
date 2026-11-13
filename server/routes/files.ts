@@ -114,7 +114,7 @@ const PAGE_NAV_SCRIPT =
   'window.parent.postMessage({type:"pm-open-file",id:Number(a.getAttribute("data-pm-file")),hash:a.hash},location.protocol+"//"+location.host);' +
   '});})();</script>';
 
-function isTextFile(row: { name: string; mime: string }): boolean {
+export function isTextFile(row: { name: string; mime: string }): boolean {
   return TEXT_EXT.has(path.extname(row.name).toLowerCase()) || row.mime.startsWith('text/');
 }
 
@@ -201,10 +201,17 @@ export function registerFileRoutes(app: FastifyInstance, ctx: AppContext): void 
         }
         const size = (await fsp.stat(dest)).size;
         const name = sanitizeName(part.filename);
-        const res = db
-          .prepare('INSERT INTO files (project_id, folder_id, name, stored_name, mime, size, uploaded_by) VALUES (?, ?, ?, ?, ?, ?, ?)')
-          .run(pid, folderId, name, stored, effectiveMime(name, part.mimetype), size, actor);
-        created.push({ id: Number(res.lastInsertRowid), stored });
+        try {
+          // Checked again: the folder may have been deleted (and its id reused) while the file was arriving.
+          if (folderId !== null) assertFolder(folderId, pid);
+          const res = db
+            .prepare('INSERT INTO files (project_id, folder_id, name, stored_name, mime, size, uploaded_by) VALUES (?, ?, ?, ?, ?, ?, ?)')
+            .run(pid, folderId, name, stored, effectiveMime(name, part.mimetype), size, actor);
+          created.push({ id: Number(res.lastInsertRowid), stored });
+        } catch (err) {
+          await fsp.rm(dest, { force: true });
+          throw err;
+        }
       }
     } catch (err) {
       // All or nothing: if a later file fails (e.g. too large), drop the ones already stored from this request.
@@ -247,10 +254,18 @@ export function registerFileRoutes(app: FastifyInstance, ctx: AppContext): void 
       const content = req.body.content ?? '';
       const stored = crypto.randomUUID();
       await writeStored(filesDir, stored, content);
-      const res = db
-        .prepare('INSERT INTO files (project_id, folder_id, name, stored_name, mime, size, uploaded_by) VALUES (?, ?, ?, ?, ?, ?, ?)')
-        .run(pid, folderId, name, stored, EXT_MIME[ext] ?? 'text/plain', Buffer.byteLength(content), actor);
-      const id = Number(res.lastInsertRowid);
+      let id: number;
+      try {
+        // Checked again after the write, as for uploads.
+        if (folderId !== null) assertFolder(folderId, pid);
+        const res = db
+          .prepare('INSERT INTO files (project_id, folder_id, name, stored_name, mime, size, uploaded_by) VALUES (?, ?, ?, ?, ?, ?, ?)')
+          .run(pid, folderId, name, stored, EXT_MIME[ext] ?? 'text/plain', Buffer.byteLength(content), actor);
+        id = Number(res.lastInsertRowid);
+      } catch (err) {
+        await fsp.rm(path.join(filesDir, stored), { force: true });
+        throw err;
+      }
       bus.emit({ kind: 'files', id, actor });
       reply.code(201);
       return dto(get(id));
