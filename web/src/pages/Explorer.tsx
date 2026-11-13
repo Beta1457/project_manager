@@ -715,10 +715,10 @@ export function ExplorerPage() {
 
   const renderRow = (row: TreeRow) => {
     if (row.type === 'empty') {
-      return <div key={row.key} className="tiny muted" style={{ paddingLeft: row.depth * 18 + 40 }}>No tasks</div>;
+      return <div key={row.key} className="tree-empty tiny muted" style={{ paddingLeft: row.depth * 18 + 40 }}>No tasks</div>;
     }
     const { item, depth, key } = row;
-    const props = { item, depth, events, dragging: draggingKeys, cut: isCut(item), selected: selection.has(key), selecting: selection.active };
+    const props = { item, depth, events, dragging: draggingKeys, cut: isCut(item), selected: selection.has(key) };
     switch (item.kind) {
       case 'folder':
         return <Row key={key} {...props} twisty={row.open ? '▾' : '▸'} onTwisty={() => toggle(key)} droppableId={`drop-folder-${item.id}`} />;
@@ -759,14 +759,15 @@ export function ExplorerPage() {
         <button className="btn btn-sm" aria-haspopup="menu" onClick={(e) => events.more(e, { kind: 'root' })}>+ New</button>
       </PageHeader>
       <div className="content flush">
-        <div className="explorer-scroll">
+        {/* "selecting" also shows the rows' checkboxes on phones (on desktop they always show). */}
+        <div className={cx('explorer-scroll', selection.active && 'selecting')}>
           <DndContext sensors={sensors} onDragStart={onDragStart} onDragEnd={onDragEnd} onDragCancel={() => setDragging(null)}>
             <div className="stack">
               <p className="small muted" style={{ margin: 0 }}>
                 <span className="hide-mobile">Right-click an item, or use its <b>⋯</b>,</span>
                 <span className="hide-desktop">Tap the <b>⋯</b> on an item</span> to add, cut, copy, paste, duplicate, rename or delete. Drag the{' '}
                 <b>⠿</b> handle to move it onto a folder, an epoch (tasks only) or “Root”.{' '}
-                <span className="hide-mobile"><b>{SHORTCUTS.select}</b> or <b>Shift+click</b> items to select several.</span>
+                <span className="hide-mobile">Tick the boxes (or <b>{SHORTCUTS.select}</b> / <b>Shift+click</b> items) to select several.</span>
                 <span className="hide-desktop">Tap <b>Select</b> to pick several.</span>
               </p>
               {clip && (
@@ -936,15 +937,13 @@ function RootRow({ events, children }: { events: RowEvents; children: ReactNode 
   );
 }
 
-function Row({ item, depth, twisty, onTwisty, droppableId, events, dragging, cut, selected, selecting, icon, extra }: {
+function Row({ item, depth, twisty, onTwisty, droppableId, events, dragging, cut, selected, icon, extra }: {
   item: Item; depth: number; twisty?: string; onTwisty?: () => void; droppableId?: string;
   events: RowEvents;
   /** The rows being dragged. */
   dragging: ReadonlySet<string> | null;
   cut: boolean;
   selected: boolean;
-  /** Something is selected (or Select mode is on): every row shows its checkbox. */
-  selecting: boolean;
   icon?: ReactNode; extra?: ReactNode;
 }) {
   const key = keyOf(item);
@@ -956,44 +955,41 @@ function Row({ item, depth, twisty, onTwisty, droppableId, events, dragging, cut
       ref={drop.setNodeRef}
       className={cx('tree-row', drop.isOver && !isSelf && 'drop-over', isSelf && 'dragging', cut && 'cut', selected && 'selected')}
       data-row={key}
-      style={{ paddingLeft: 8 + depth * 18 }}
       onClick={(e) => events.click(e, item)}
       // Shift+click picks a range: don't let the browser select text as well.
       onMouseDown={(e) => {
         if (e.shiftKey) e.preventDefault();
       }}
       onContextMenu={(e) => events.context(e, item, e.currentTarget)}
-      // Keyboard: Enter/Space opens (folders expand), arrows expand/collapse, Shift+F10 or the menu key opens
-      // the menu, F2 renames, Delete deletes, Ctrl+C / X / V copy, cut and paste.
+      // Keyboard: Enter opens (folders expand), Space ticks the row's box (Shift+Space: a range) as in the List,
+      // arrows expand/collapse, Shift+F10 or the menu key opens the menu, F2 renames, Delete deletes,
+      // Ctrl+C / X / V copy, cut and paste.
       tabIndex={0}
       aria-expanded={twisty ? twisty === '▾' : undefined}
       onKeyDown={(e) => {
         if (e.target !== e.currentTarget) return;
-        if (e.key === 'Enter' || e.key === ' ') {
+        if (e.key === 'Enter') {
           e.preventDefault();
           events.open(item);
+        } else if (e.key === ' ') {
+          e.preventDefault();
+          events.check(item, e.shiftKey);
         } else if (onTwisty && ((e.key === 'ArrowRight' && twisty === '▸') || (e.key === 'ArrowLeft' && twisty === '▾'))) {
           e.preventDefault();
           onTwisty();
         } else events.keys(e, item);
       }}
     >
-      {selecting && (
-        <input
-          type="checkbox"
-          className="select-box"
-          checked={selected}
-          aria-label={`Select ${item.name}`}
-          onChange={noop}
-          // Ticked here, where Shift is known; React wants an onChange on a controlled box.
-          onClick={(e) => {
-            e.stopPropagation();
-            events.check(item, e.shiftKey);
-          }}
-        />
-      )}
-      {/* Pointer/touch only (no keyboard drag sensor), so it is not a tab stop. */}
-      <span ref={drag.setNodeRef} {...drag.listeners} className="drag-handle" onClick={(e) => e.stopPropagation()} aria-hidden="true">
+      {/* The checkbox column, as in the List: always on desktop, on phones only while selecting (styles.css).
+          The cell around the box ticks it too, an easier target than the box alone. It is ticked here, where
+          Shift is known; React wants an onChange on a controlled box. */}
+      <span className="select-cell" onClick={(e) => { e.stopPropagation(); events.check(item, e.shiftKey); }}>
+        <input type="checkbox" className="select-box" checked={selected} aria-label={`Select ${item.name}`} onChange={noop} />
+      </span>
+      {/* Pointer/touch only (no keyboard drag sensor), so it is not a tab stop. The tree's indent goes here, after
+          the checkbox column, so the boxes line up. */}
+      <span ref={drag.setNodeRef} {...drag.listeners} className="drag-handle" style={{ marginLeft: depth * 18 }}
+        onClick={(e) => e.stopPropagation()} aria-hidden="true">
         ⠿
       </span>
       <span className="twisty" onClick={(e) => { if (onTwisty) { e.stopPropagation(); onTwisty(); } }}>{twisty ?? ''}</span>

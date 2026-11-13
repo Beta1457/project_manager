@@ -362,13 +362,24 @@ html.resizing, html.resizing * { cursor: col-resize !important; user-select: non
 .tree-row .name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tree-row .more { opacity: 0.7; }
 .drag-handle { cursor: grab; color: var(--muted); padding: 0 4px; touch-action: none; font-size: 1.1rem; }
+/* The checkbox column, as in the List: on every row on desktop, on phones only while selecting. The cell around
+   the box ticks it too; the tree's indent comes after it (on the ⠿), so the boxes line up. */
+.tree-row .select-cell { flex: none; align-self: stretch; display: flex; align-items: center; justify-content: center; width: 28px; margin: -4px 0 -4px -6px; cursor: pointer; }
+.tree .tree-empty { margin-left: 30px; } /* "No tasks" moves over with the rows */
+@media (max-width: 899px) {
+  .tree-row .select-cell { display: none; }
+  .tree .tree-empty { margin-left: 0; }
+  .selecting .tree-row .select-cell { display: flex; }
+  .selecting .tree .tree-empty { margin-left: 30px; }
+}
 /* The page scrolls inside this, so the selection bar can sit under it (as on the List page). */
 .explorer-scroll { flex: 1; min-height: 0; overflow: auto; padding: 12px 12px 80px; }
 @media (min-width: 900px) { .explorer-scroll { padding: 16px 20px 100px; } }
 
 /* ---------- Epochs ---------- */
 .epoch-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
-.epoch-card { padding: 14px; display: grid; gap: 10px; border-top: 5px solid; cursor: pointer; color: inherit; }
+/* minmax(0, 1fr): a long name shortens with "…" instead of widening the card's column (and the progress bar) past its edge. */
+.epoch-card { padding: 14px; display: grid; gap: 10px; grid-template-columns: minmax(0, 1fr); border-top: 5px solid; cursor: pointer; color: inherit; }
 
 /* ---------- Diagram (pages/Diagram.tsx, diagram/*) ---------- */
 /* Box text sizes must match diagram/sizes.ts, which measures text to size the boxes before they are drawn. */
