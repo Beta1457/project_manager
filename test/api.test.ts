@@ -33,6 +33,21 @@ async function call(method: string, url: string, body?: unknown, auth: 'session'
   return { status: res.statusCode, body: res.body ? (JSON.parse(res.body) as Json) : {}, res };
 }
 
+/** Uploads a small file into a folder (null: the top level) and returns it. */
+async function upload(folderId: number | null, filename: string, data: string, type = 'text/plain') {
+  const b = '----upload';
+  const res = await app.inject({
+    method: 'POST',
+    url: '/api/v1/files',
+    headers: { cookie, 'x-pm-client': 'web', 'content-type': `multipart/form-data; boundary=${b}` },
+    payload:
+      (folderId !== null ? `--${b}\r\nContent-Disposition: form-data; name="folderId"\r\n\r\n${folderId}\r\n` : '') +
+      `--${b}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: ${type}\r\n\r\n${data}\r\n--${b}--\r\n`,
+  });
+  assert.equal(res.statusCode, 201, res.body);
+  return JSON.parse(res.body).files[0] as Json;
+}
+
 before(async () => {
   const built = await buildApp(
     {
@@ -1243,19 +1258,6 @@ test('copy: a folder with everything in it, epochs, tasks with their sub-tasks a
   const tree = async () => (await call('GET', '/api/v1/tree')).body;
   const content = async (id: number) => (await app.inject({ method: 'GET', url: `/api/v1/files/${id}/content`, headers: { cookie } })).body;
   const blobs = () => fs.readdirSync(ctx.filesDir).length;
-  const upload = async (folderId: number, filename: string, data: string, type: string) => {
-    const b = '----copy';
-    const res = await app.inject({
-      method: 'POST',
-      url: '/api/v1/files',
-      headers: { cookie, 'x-pm-client': 'web', 'content-type': `multipart/form-data; boundary=${b}` },
-      payload:
-        `--${b}\r\nContent-Disposition: form-data; name="folderId"\r\n\r\n${folderId}\r\n` +
-        `--${b}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: ${type}\r\n\r\n${data}\r\n--${b}--\r\n`,
-    });
-    assert.equal(res.statusCode, 201, res.body);
-    return JSON.parse(res.body).files[0] as Json;
-  };
 
   // Src/      "Card" with two sub-tasks: "Card text" here, "Card VFX" in an epoch outside Src; the epoch "Src epoch"
   // Src/Art/  the epoch "Sprites" with "Draw hero"; "Loose art"; "Orphan", a sub-task of a task outside Src;
@@ -1463,6 +1465,238 @@ test('copy: a page saved in another encoding keeps every byte when its links are
   assert.equal(newPage.size, page(newImage.id).length);
 });
 
+test('explorer: move several items of any kind at once; what is inside goes along; all or nothing', async () => {
+  const move = (items: Json[], to: Json, auth: 'session' | 'token' = 'session') => call('POST', '/api/v1/explorer/move', { items, to }, auth);
+  const folder = async (name: string, parentId: number | null = null) => (await call('POST', '/api/v1/folders', { name, parentId })).body;
+  const mk = async (title: string, extra: Json = {}) => (await call('POST', '/api/v1/tasks', { title, ...extra })).body;
+  const get = async (id: number) => (await call('GET', `/api/v1/tasks/${id}`)).body;
+  const tree = async () => (await call('GET', '/api/v1/tree')).body;
+  const ref = (kind: string, x: Json) => ({ kind, id: x.id });
+  const where = async () => {
+    const t = await tree();
+    return {
+      folder: (x: Json) => t.folders.find((f: Json) => f.id === x.id).parentId,
+      epoch: (x: Json) => t.epochs.find((e: Json) => e.id === x.id).folderId,
+      task: (x: Json) => {
+        const found = t.tasks.find((k: Json) => k.id === x.id);
+        return [found.epochId, found.folderId];
+      },
+      file: (x: Json) => t.files.find((f: Json) => f.id === x.id).folderId,
+    };
+  };
+
+  // A/ holds B/ (with b.txt), the epoch "Move epoch" (with a task), a task and a.txt. C/ holds a task.
+  const a = await folder('Move A');
+  const b = await folder('Move B', a.id);
+  const c = await folder('Move C');
+  const epochA = (await call('POST', '/api/v1/epochs', { name: 'Move epoch', folderId: a.id })).body;
+  const epochTop = (await call('POST', '/api/v1/epochs', { name: 'Move top epoch' })).body;
+  const inA = await mk('Move in A', { folderId: a.id });
+  const inEpoch = await mk('Move in epoch', { epochId: epochA.id });
+  const inbox = await mk('Move inbox');
+  const inC = await mk('Move in C', { folderId: c.id });
+  const aFile = await upload(a.id, 'move-a.txt', 'a');
+  const bFile = await upload(b.id, 'move-b.txt', 'b');
+  const topFile = await upload(null, 'move-top.txt', 'top');
+
+  // Mixed kinds into one folder in one request, with one live event per kind that moved.
+  const seen: string[] = [];
+  const off = ctx.bus.subscribe((e) => seen.push(e.kind));
+  const r = await move([ref('folder', a), ref('file', topFile), ref('task', inbox)], { folderId: c.id }, 'token');
+  off();
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.moved, 3);
+  assert.deepEqual(seen.sort(), ['files', 'folders', 'tasks']);
+  let w = await where();
+  assert.deepEqual([w.folder(a), w.file(topFile), w.task(inbox)], [c.id, c.id, [null, c.id]]);
+  assert.match((await get(inbox.id)).activity[0].message, /moved to folder/);
+  // What was inside A went with it.
+  assert.deepEqual([w.folder(b), w.epoch(epochA), w.task(inA), w.file(aFile)], [a.id, a.id, [null, a.id], a.id]);
+
+  // Items inside another item that moves keep their place inside it; items already there stay put.
+  const r2 = await move([ref('folder', a), ref('folder', b), ref('file', bFile), ref('task', inEpoch)], { folderId: null });
+  assert.equal(r2.body.moved, 1);
+  w = await where();
+  assert.deepEqual([w.folder(a), w.folder(b), w.file(bFile), w.task(inEpoch)], [null, a.id, b.id, [epochA.id, null]]);
+  assert.equal((await move([ref('file', topFile), ref('task', inC)], { folderId: c.id })).body.moved, 0);
+
+  // Tasks into an epoch, from a folder or from another epoch.
+  assert.equal((await move([ref('task', inA), ref('task', inEpoch)], { epochId: epochTop.id })).body.moved, 2);
+  w = await where();
+  assert.deepEqual([w.task(inA), w.task(inEpoch)], [[epochTop.id, null], [epochTop.id, null]]);
+  assert.match((await get(inA.id)).activity[0].message, /moved to epoch "Move top epoch"/);
+
+  // Refused, and nothing moves: a folder into itself or a folder inside it (even with other items), anything but
+  // tasks into an epoch, an item or destination that isn't there, a bad destination or list.
+  const before = await tree();
+  const refused: Array<[Json[], Json, number, RegExp?]> = [
+    [[ref('file', topFile), ref('folder', a)], { folderId: b.id }, 400, /"Move A" can't go inside itself or a folder inside it/],
+    [[ref('folder', c), ref('folder', a)], { folderId: a.id }, 400],
+    [[ref('task', inC), ref('file', topFile)], { epochId: epochTop.id }, 400, /Only tasks can go inside an epoch: "move-top\.txt" isn't a task/],
+    [[ref('task', inC), { kind: 'file', id: 999999 }], { folderId: null }, 404],
+    [[ref('task', inC)], { epochId: 999999 }, 404],
+    [[ref('task', inC)], { folderId: 999999 }, 404],
+    [[ref('task', inC)], {}, 400],
+    [[ref('task', inC)], { folderId: null, epochId: epochTop.id }, 400],
+    [[], { folderId: null }, 400],
+    [[{ kind: 'board', id: 1 }], { folderId: null }, 400],
+  ];
+  for (const [items, to, status, error] of refused) {
+    const res = await move(items, to);
+    assert.equal(res.status, status, JSON.stringify({ items, to, body: res.body }));
+    if (error) assert.match(res.body.error, error);
+  }
+  assert.deepEqual(await tree(), before);
+
+  // Items from two projects are refused.
+  const other = (await call('POST', '/api/v1/projects', { key: 'MOV', name: 'Move other' })).body;
+  const there = (await call('POST', '/api/v1/tasks?project=MOV', { title: 'Elsewhere' })).body;
+  const mixed = await move([ref('task', inC), ref('task', there)], { folderId: null });
+  assert.equal(mixed.status, 400);
+  assert.match(mixed.body.error, /one project/);
+  assert.equal((await call('DELETE', `/api/v1/projects/${other.id}?confirm=MOV`)).status, 200);
+  assert.equal((await get(inC.id)).folderId, c.id);
+});
+
+test('explorer: delete several items of any kind at once; folders and epochs keep the rest of what is inside', async () => {
+  const del = (items: Json[], extra: Json = {}, auth: 'session' | 'token' = 'session') =>
+    call('POST', '/api/v1/explorer/delete', { items, ...extra }, auth);
+  const folder = async (name: string, parentId: number | null = null) => (await call('POST', '/api/v1/folders', { name, parentId })).body;
+  const mk = async (title: string, extra: Json = {}) => (await call('POST', '/api/v1/tasks', { title, ...extra })).body;
+  const tree = async () => (await call('GET', '/api/v1/tree')).body;
+  const blobs = () => fs.readdirSync(ctx.filesDir).length;
+  const ref = (kind: string, x: Json) => ({ kind, id: x.id });
+  const ids = (list: Json[]) => list.map((x) => x.id);
+
+  // P/ holds Q/ (with a task and a file), the epoch "Del epoch" (two tasks), a task and a file.
+  const p = await folder('Del P');
+  const q = await folder('Del Q', p.id);
+  const epoch = (await call('POST', '/api/v1/epochs', { name: 'Del epoch', folderId: p.id })).body;
+  const e1 = await mk('Del e1', { epochId: epoch.id });
+  const e2 = await mk('Del e2', { epochId: epoch.id });
+  const inP = await mk('Del in P', { folderId: p.id });
+  const inQ = await mk('Del in Q', { folderId: q.id });
+  const pFile = await upload(p.id, 'del-p.txt', 'p');
+  const qFile = await upload(q.id, 'del-q.txt', 'q');
+  const parent = await mk('Del parent');
+  const kid = await mk('Del kid', { parent: parent.key });
+
+  const startBlobs = blobs();
+  const seen: string[] = [];
+  const off = ctx.bus.subscribe((e) => seen.push(e.kind));
+  const r = await del([ref('folder', p), ref('task', e1), ref('file', pFile), ref('task', parent)], {}, 'token');
+  off();
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.deepEqual(r.body.deleted, { folders: 1, epochs: 0, tasks: 2, files: 1 });
+  assert.deepEqual([...new Set(seen)].sort(), ['epochs', 'files', 'folders', 'tasks']);
+  assert.equal(blobs(), startBlobs - 1, 'the stored file goes too');
+  const t = await tree();
+  assert.ok(!ids(t.folders).includes(p.id) && !ids(t.files).includes(pFile.id));
+  assert.ok(!ids(t.tasks).includes(e1.id) && !ids(t.tasks).includes(parent.id));
+  // The rest of P moved up to the top level, its task to the Inbox; the rest of the epoch stayed in it.
+  const task = (x: Json) => t.tasks.find((k: Json) => k.id === x.id);
+  assert.equal(t.folders.find((f: Json) => f.id === q.id).parentId, null);
+  assert.equal(t.epochs.find((e: Json) => e.id === epoch.id).folderId, null);
+  assert.deepEqual([task(inP).epochId, task(inP).folderId], [null, null]);
+  assert.deepEqual([task(e2).epochId, task(inQ).folderId, t.files.find((f: Json) => f.id === qFile.id).folderId], [epoch.id, q.id, q.id]);
+  // The sub-task that stays is now a top-level task, and says why.
+  const k = (await call('GET', `/api/v1/tasks/${kid.id}`)).body;
+  assert.equal(k.parentId, null);
+  assert.match(k.activity[0].message, /now a top-level task/);
+
+  // withSubtasks deletes sub-tasks too.
+  const p2 = await mk('Del parent 2');
+  await mk('Del kid 2', { parent: p2.key });
+  assert.deepEqual((await del([ref('task', p2)], { withSubtasks: true })).body.deleted, { folders: 0, epochs: 0, tasks: 2, files: 0 });
+
+  // A folder and a folder inside it: both go, and what was inside the inner one ends up where the outer one was.
+  const x = await folder('Del X');
+  const y = await folder('Del Y', x.id);
+  const yFile = await upload(y.id, 'del-y.txt', 'y');
+  assert.deepEqual((await del([ref('folder', x), ref('folder', y)])).body.deleted, { folders: 2, epochs: 0, tasks: 0, files: 0 });
+  assert.equal((await tree()).files.find((f: Json) => f.id === yFile.id).folderId, null);
+
+  // An epoch with time logged directly on it needs deleteTime, which deletes that time too.
+  const timed = (await call('POST', '/api/v1/epochs', { name: 'Del timed' })).body;
+  assert.equal((await call('POST', '/api/v1/time', { epochId: timed.id, minutes: 30 })).status, 201);
+  const refusedTime = await del([ref('epoch', timed), ref('folder', q)]);
+  assert.equal(refusedTime.status, 409);
+  assert.match(refusedTime.body.error, /"Del timed" has time logged directly on it/);
+  assert.ok(ids((await tree()).folders).includes(q.id), 'nothing deleted');
+  assert.deepEqual((await del([ref('epoch', timed)], { deleteTime: true })).body.deleted, { folders: 0, epochs: 1, tasks: 0, files: 0 });
+  assert.equal((await call('GET', '/api/v1/time')).body.entries.filter((e: Json) => e.epochId === timed.id).length, 0);
+
+  // All or nothing: one item that isn't there and nothing is deleted.
+  const before = await tree();
+  const bad = await del([ref('folder', q), ref('task', e2), { kind: 'file', id: 999999 }]);
+  assert.equal(bad.status, 404);
+  assert.deepEqual(await tree(), before);
+  assert.equal((await del([])).status, 400);
+});
+
+test('copy: several items at once, each copied once, and duplicates next to their originals', async () => {
+  const copy = (body: Json) => call('POST', '/api/v1/copy', body);
+  const folder = async (name: string, parentId: number | null = null) => (await call('POST', '/api/v1/folders', { name, parentId })).body;
+  const mk = async (title: string, extra: Json = {}) => (await call('POST', '/api/v1/tasks', { title, ...extra })).body;
+  const tree = async () => (await call('GET', '/api/v1/tree')).body;
+  const ref = (kind: string, x: Json) => ({ kind, id: x.id });
+
+  // S1/ holds notes.txt, art.png, the epoch "Copy epoch" and the task "Copy card", whose sub-task "Copy card VFX"
+  // lives in S2/, which has a notes.txt of its own.
+  const s1 = await folder('Copy S1');
+  const s2 = await folder('Copy S2');
+  const notes1 = await upload(s1.id, 'notes.txt', 'one');
+  const notes2 = await upload(s2.id, 'notes.txt', 'two');
+  const art = await upload(s1.id, 'art.png', 'PNG', 'image/png');
+  const epoch = (await call('POST', '/api/v1/epochs', { name: 'Copy epoch', folderId: s1.id })).body;
+  const card = await mk('Copy card', { folderId: s1.id });
+  const vfx = await mk('Copy card VFX', { folderId: s2.id, parent: card.key });
+
+  // Two files with one name into one folder: each gets a free name there, in the order given.
+  const two = await copy({ items: [ref('file', notes1), ref('file', notes2)], to: { folderId: s2.id } });
+  assert.equal(two.status, 201, JSON.stringify(two.body));
+  assert.deepEqual(two.body.items.map((i: Json) => i.name), ['notes (copy).txt', 'notes (copy 2).txt']);
+  assert.deepEqual(two.body.item, two.body.items[0]);
+  assert.equal(two.body.files, 2);
+
+  // What is inside an item is copied once, with it, even when it is asked for too: the folder brings its files,
+  // epoch and task, and the task its sub-task (whose copy goes to S2, like its original).
+  const alone = await copy({ item: ref('folder', s1), to: { folderId: null }, dryRun: true });
+  assert.deepEqual([alone.body.folders, alone.body.epochs, alone.body.tasks, alone.body.files, alone.body.subtasksElsewhere], [1, 1, 2, 2, 1]);
+  const all = [ref('folder', s1), ref('file', art), ref('task', card), ref('epoch', epoch), ref('task', vfx)];
+  assert.deepEqual((await copy({ items: all, to: { folderId: null }, dryRun: true })).body, alone.body);
+  // A sub-task asked for with its parent comes along with the parent.
+  const pair = await copy({ items: [ref('task', vfx), ref('task', card)], to: { folderId: null } });
+  assert.equal(pair.status, 201, JSON.stringify(pair.body));
+  assert.equal(pair.body.tasks, 2);
+  assert.deepEqual(pair.body.items.map((i: Json) => i.name), ['Copy card']);
+
+  // Duplicates of items in different places: each copy goes next to its original.
+  const inbox = await mk('Copy inbox task');
+  const dup = await copy({ items: [ref('file', art), ref('task', inbox), ref('epoch', epoch)], to: { inPlace: true } });
+  assert.equal(dup.status, 201, JSON.stringify(dup.body));
+  assert.deepEqual(dup.body.items.map((i: Json) => i.name), ['art (copy).png', 'Copy inbox task (copy)', 'Copy epoch (copy)']);
+  const t = await tree();
+  const dupTask = t.tasks.find((x: Json) => x.id === dup.body.items[1].id);
+  assert.equal(t.files.find((f: Json) => f.id === dup.body.items[0].id).folderId, s1.id);
+  assert.deepEqual([dupTask.epochId, dupTask.folderId], [null, null]);
+  assert.equal(t.epochs.find((e: Json) => e.id === dup.body.items[2].id).folderId, s1.id);
+
+  // Refused.
+  const refused: Array<[Json, number]> = [
+    [{ item: ref('task', card), items: [ref('task', card)], to: { folderId: null } }, 400],
+    [{ to: { folderId: null } }, 400],
+    [{ items: [], to: { folderId: null } }, 400],
+    [{ items: [ref('task', card)], to: { inPlace: true, folderId: null } }, 400],
+    [{ items: [ref('task', card), ref('file', art)], to: { epochId: epoch.id } }, 400],
+    [{ items: [ref('folder', s2), ref('folder', s1)], to: { folderId: s1.id } }, 400],
+    [{ items: [ref('task', card), { kind: 'file', id: 999999 }], to: { inPlace: true } }, 404],
+  ];
+  for (const [body, status] of refused) assert.equal((await copy(body)).status, status, JSON.stringify(body));
+  const intoItself = await copy({ items: [ref('folder', s2), ref('folder', s1)], to: { folderId: s1.id } });
+  assert.match(intoItself.body.error, /"Copy S1" can't be copied into itself or into a folder inside it/);
+});
+
 test('passwords and tokens are stored only as hashes', async () => {
   createUser(ctx.db, 'hash-check', 'plain-text-password');
   const row = ctx.db.prepare('SELECT password_hash FROM users WHERE username = ?').get('hash-check') as { password_hash: string };
@@ -1657,7 +1891,7 @@ test('projects are private: another account gets "not found" for everything in t
   const category = (await call('GET', '/api/v1/categories')).body.categories[0];
   const entry = (await call('POST', '/api/v1/time', { taskId: task.id, minutes: 5 })).body;
   const project = (await call('GET', '/api/v1/projects')).body.projects.find((p: Json) => p.key === 'T');
-  const jayToken = (await call('GET', '/api/v1/tokens')).body.tokens[0];
+  const aliceToken = (await call('GET', '/api/v1/tokens')).body.tokens[0];
   const template = (await call('POST', '/api/v1/templates', { name: 'Private template' })).body;
 
   createUser(ctx.db, 'mallory', 'mallory-password');
@@ -1743,6 +1977,13 @@ test('projects are private: another account gets "not found" for everything in t
     ['POST', '/api/v1/copy', { item: { kind: 'file', id: doc.id }, to: { folderId: null } }],
     ['POST', '/api/v1/copy', { item: { kind: 'task', id: ownTask.id }, to: { epochId: epoch.id } }],
     ['POST', '/api/v1/copy', { item: { kind: 'task', id: ownTask.id }, to: { folderId: folder.id } }],
+    ['POST', '/api/v1/copy', { items: [{ kind: 'task', id: ownTask.id }, { kind: 'folder', id: folder.id }], to: { folderId: null } }],
+    ['POST', '/api/v1/copy', { items: [{ kind: 'epoch', id: epoch.id }], to: { inPlace: true } }],
+    ['POST', '/api/v1/explorer/move', { items: [{ kind: 'folder', id: folder.id }], to: { folderId: null } }],
+    ['POST', '/api/v1/explorer/move', { items: [{ kind: 'task', id: ownTask.id }], to: { epochId: epoch.id } }],
+    ['POST', '/api/v1/explorer/move', { items: [{ kind: 'task', id: ownTask.id }], to: { folderId: folder.id } }],
+    ['POST', '/api/v1/explorer/delete', { items: [{ kind: 'task', id: ownTask.id }, { kind: 'task', id: task.id }] }],
+    ['POST', '/api/v1/explorer/delete', { items: [{ kind: 'file', id: doc.id }] }],
   ];
   for (const auth of ['session', 'token'] as const) {
     if (auth === 'token') m.useToken(mToken);
@@ -1776,7 +2017,7 @@ test('projects are private: another account gets "not found" for everything in t
   assert.equal((await m.req('POST', '/api/v1/users', { username: 'x2', password: 'long-enough-pw' })).status, 403);
   assert.equal((await m.req('GET', '/api/v1/backups')).status, 403);
   assert.deepEqual((await m.req('GET', '/api/v1/tokens')).body.tokens.map((t: Json) => t.name), ['mallory-bot']);
-  assert.equal((await m.req('DELETE', `/api/v1/tokens/${jayToken.id}`)).status, 404);
+  assert.equal((await m.req('DELETE', `/api/v1/tokens/${aliceToken.id}`)).status, 404);
   // A raw parentId is ignored rather than checked, so it can't be used to probe for other people's tasks.
   const probe = await m.req('POST', '/api/v1/tasks', { title: 'Probe', parentId: task.id });
   assert.equal(probe.status, 201);

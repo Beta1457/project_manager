@@ -10,12 +10,13 @@ import {
   useSensor,
   useSensors,
   type DragEndEvent,
+  type DragStartEvent,
 } from '@dnd-kit/core';
 import { api, V1 } from '../api';
 import { useColors, useEpochs, useTemplates, useTree } from '../hooks';
 import { useMutate } from '../mutate';
 import type { FileItem, Tree } from '../types';
-import { cx, errorMessage, formatBytes, joinAnd, plural } from '../util';
+import { cx, errorMessage, formatBytes, formatMinutes, joinAnd, plural } from '../util';
 import { Markdown, Spinner } from '../components/Bits';
 import { MarkdownEditor } from '../components/MarkdownEditor';
 import { folderPath } from '../components/Filters';
@@ -26,6 +27,7 @@ import { ActionSheet, ContextMenu, type MenuPosition } from '../components/Conte
 import { Sheet, isSheetOpen } from '../components/Sheet';
 import { useToast } from '../components/Toast';
 import { useProject } from '../projectContext';
+import { useSelection, type Selection } from '../selection';
 import { EpochForm, epochDeleteQuestion } from './Epochs';
 import {
   ICONS,
@@ -33,10 +35,17 @@ import {
   containerOf,
   copyNeedsConfirm,
   describeCounts,
+  describeKinds,
   destName,
+  destNameFor,
   explorerActions,
   findItem,
+  flattenTree,
+  inboxRows,
   isDeleteKey,
+  itemsName,
+  keyOf,
+  moveRefusal,
   pasteDestination,
   pasteRefusal,
   placeOf,
@@ -47,6 +56,7 @@ import {
   type Item,
   type Kind,
   type Target,
+  type TreeRow,
 } from '../explorer/actions';
 
 const EXP_KEY = 'pm.explorer.expanded';
@@ -62,10 +72,17 @@ function loadExpanded(): Set<string> {
 // which browsers only offer over HTTPS (this app is usually opened over plain HTTP on the home network).
 const KINDS: Kind[] = ['folder', 'epoch', 'task', 'file'];
 const clipKey = (projectId: number) => `pm.explorer.clip.${projectId}`;
+const isItemRef = (v: unknown): v is Item => {
+  const i = v as Partial<Item> | null;
+  return !!i && KINDS.includes(i.kind as Kind) && Number.isInteger(i.id);
+};
 function loadClip(projectId: number): Clip | null {
   try {
-    const v = JSON.parse(sessionStorage.getItem(clipKey(projectId)) ?? 'null') as Clip | null;
-    return v && (v.mode === 'cut' || v.mode === 'copy') && KINDS.includes(v.item?.kind) && Number.isInteger(v.item.id) ? v : null;
+    const v = JSON.parse(sessionStorage.getItem(clipKey(projectId)) ?? 'null') as { mode?: unknown; items?: unknown; item?: unknown } | null;
+    if (!v || (v.mode !== 'cut' && v.mode !== 'copy')) return null;
+    // Before several items could be cut or copied at once, the clipboard held { mode, item }.
+    const items: unknown[] = Array.isArray(v.items) ? v.items : v.item ? [v.item] : [];
+    return items.length && items.every(isItemRef) ? { mode: v.mode, items } : null;
   } catch {
     return null;
   }
@@ -80,6 +97,9 @@ function storeClip(projectId: number, clip: Clip | null) {
 }
 
 const ALL_KINDS = ['folders', 'epochs', 'tasks', 'files'];
+/** What the server needs to know about items: which ones. */
+const refs = (items: Item[]) => items.map(({ kind, id }) => ({ kind, id }));
+const noop = () => {};
 
 interface MenuState {
   id: number;
@@ -99,8 +119,11 @@ interface NewTask {
   chooseTemplate?: boolean;
 }
 
-/** What rows hand up to the page: opening, the menus (right-click, ⋯, menu key) and shortcuts. */
+/** What rows hand up to the page: clicks (open, or select), the menus (right-click, ⋯, menu key) and shortcuts. */
 interface RowEvents {
+  click: (e: MouseEvent<HTMLElement>, item: Item) => void;
+  /** The row's checkbox; `range` with Shift. */
+  check: (item: Item, range: boolean) => void;
   open: (item: Item) => void;
   context: (e: MouseEvent<HTMLElement>, target: Target, row: HTMLElement | null) => void;
   more: (e: MouseEvent<HTMLButtonElement>, target: Target) => void;
@@ -108,7 +131,7 @@ interface RowEvents {
 }
 
 /**
- * After a row is deleted, the focus would fall back to the page: give it to the row that was next to it
+ * After rows are deleted, the focus would fall back to the page: give it to a row that was next to them
  * instead, once the deleted row has left the screen, so the keyboard keeps its place. (Timers rather than
  * animation frames, which stop while the tab is in the background.)
  */
@@ -129,23 +152,38 @@ function refocusAfterRemoval(removed: string, candidates: string[]) {
   check();
 }
 
+/** The rows next to the ones about to be deleted, nearest first: after them, then before them. */
+function neighboursOf(removed: Set<string>): string[] {
+  const rows = [...document.querySelectorAll<HTMLElement>('[data-row]')].map((el) => el.dataset.row ?? '');
+  const at = rows.map((k, i) => (removed.has(k) ? i : -1)).filter((i) => i >= 0);
+  if (!at.length) return [];
+  const after = rows.slice(Math.max(...at) + 1).filter((k) => !removed.has(k));
+  const before = rows.slice(0, Math.min(...at)).filter((k) => !removed.has(k)).reverse();
+  return [...after, ...before];
+}
+
 const labelOf = (target: Target) =>
-  target.kind === 'root' ? 'the top level' : target.kind === 'inbox' ? 'the Inbox' : `“${target.name}”`;
+  target.kind === 'root' ? 'the top level'
+  : target.kind === 'inbox' ? 'the Inbox'
+  : target.kind === 'selection' ? `${target.items.length} selected items`
+  : `“${target.name}”`;
 
 export function ExplorerPage() {
   const { data: tree, isLoading } = useTree();
   const { project } = useProject();
   const templates = useTemplates().data ?? [];
-  const epochs = useEpochs().data ?? [];
+  const epochs = useEpochs().data;
+  const colors = useColors();
   const mutate = useMutate();
   const toast = useToast();
   const navigate = useNavigate();
   const [, openTask] = useTaskParam();
   const [expanded, setExpanded] = useState<Set<string>>(loadExpanded);
-  const [dragging, setDragging] = useState<Item | null>(null);
+  /** What a drag carries: the row picked up, and the selection with it when that row is part of it. */
+  const [dragging, setDragging] = useState<{ lead: Item; items: Item[] } | null>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [sheetFor, setSheetFor] = useState<Target | null>(null);
-  const [moving, setMoving] = useState<Item | null>(null);
+  const [moving, setMoving] = useState<Item[] | null>(null);
   const [preview, setPreview] = useState<{ file: FileItem; edit: boolean; hash?: string } | null>(null);
   const [newTask, setNewTask] = useState<NewTask | null>(null);
   const [newEpochIn, setNewEpochIn] = useState<{ folderId: number | null } | null>(null);
@@ -173,6 +211,25 @@ export function ExplorerPage() {
     return () => document.removeEventListener('pointerdown', onPointer, true);
   }, []);
 
+  // The rows as shown, and the selection over them (in that order: Shift picks a range as you see it).
+  const rows = useMemo(() => (tree ? flattenTree(tree, expanded) : []), [tree, expanded]);
+  const inbox = useMemo(() => (tree ? inboxRows(tree) : []), [tree]);
+  const itemRows = useMemo(() => [...rows, ...inbox].filter((r): r is Extract<TreeRow, { type: 'item' }> => r.type === 'item'), [rows, inbox]);
+  const orderedKeys = useMemo(() => itemRows.map((r) => r.key), [itemRows]);
+  const itemByKey = useMemo(() => new Map(itemRows.map((r) => [r.key, r.item])), [itemRows]);
+  const selection = useSelection(orderedKeys);
+  const selected = useMemo(() => selection.ids.flatMap((k) => itemByKey.get(k) ?? []), [selection.ids, itemByKey]);
+  const draggingKeys = useMemo(() => (dragging ? new Set(dragging.items.map(keyOf)) : null), [dragging]);
+  const lookups = useMemo(
+    () =>
+      tree && {
+        epochs: new Map(tree.epochs.map((e) => [e.id, e])),
+        tasks: new Map(tree.tasks.map((t) => [t.id, t])),
+        files: new Map(tree.files.map((f) => [f.id, f])),
+      },
+    [tree],
+  );
+
   const setClip = useCallback(
     (next: Clip | null) => {
       setSavedClip(next);
@@ -180,28 +237,28 @@ export function ExplorerPage() {
     },
     [project.id],
   );
-  // The clipboard's item as it is now (renamed since?); nothing once it is deleted.
+  // The clipboard's items as they are now (renamed since?); the deleted ones drop out.
   const clip = useMemo(() => {
     if (!savedClip || !tree) return null;
-    const item = findItem(tree, savedClip.item);
-    return item ? { mode: savedClip.mode, item } : null;
+    const items = savedClip.items.flatMap((i) => findItem(tree, i) ?? []);
+    return items.length ? { mode: savedClip.mode, items } : null;
   }, [savedClip, tree]);
   useEffect(() => {
     if (tree && savedClip && !clip) setClip(null);
   }, [tree, savedClip, clip, setClip]);
 
-  // Esc empties the clipboard (menus and dialogs use Esc themselves first).
+  // Esc empties the clipboard, once nothing is selected (menus, dialogs and the selection use Esc first).
   useEffect(() => {
     if (!clip) return;
     const onKey = (e: globalThis.KeyboardEvent) => {
-      if (e.key !== 'Escape' || e.defaultPrevented || isSheetOpen()) return;
+      if (e.key !== 'Escape' || e.defaultPrevented || isSheetOpen() || selection.active) return;
       const el = e.target as HTMLElement | null;
       if (el && (el.isContentEditable || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT')) return;
       setClip(null);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [clip, setClip]);
+  }, [clip, setClip, selection.active]);
 
   const toggle = (key: string) =>
     setExpanded((s) => {
@@ -241,20 +298,6 @@ export function ExplorerPage() {
     }
   };
 
-  const onDragEnd = (e: DragEndEvent) => {
-    setDragging(null);
-    const item = e.active.data.current?.item as Item | undefined;
-    const over = e.over?.id ? String(e.over.id) : null;
-    if (!item || !over) return;
-    if (over === 'drop-root') void moveItem(item, { folderId: null });
-    else if (over.startsWith('drop-folder-')) {
-      const folderId = Number(over.slice(12));
-      if (item.kind === 'folder' && folderId === item.id) return;
-      void moveItem(item, { folderId });
-      expand(`folder-${folderId}`);
-    } else if (over.startsWith('drop-epoch-')) void moveItem(item, { epochId: Number(over.slice(11)) });
-  };
-
   const upload = async (files: FileList | null, folderId: number | null) => {
     if (!files?.length) return;
     const fd = new FormData();
@@ -283,7 +326,47 @@ export function ExplorerPage() {
     if (parentId !== null) expand(`folder-${parentId}`);
   };
 
-  if (isLoading || !tree) return <><PageHeader title="Explorer" /><Spinner /></>;
+  if (isLoading || !tree || !lookups) return <><PageHeader title="Explorer" /><Spinner /></>;
+
+  /** Moves several items in one request, all or nothing. Opens the destination first, so they stay in view (and selected). */
+  const moveItems = async (items: Item[], dest: Dest) => {
+    const refusal = moveRefusal(items, dest, tree);
+    if (refusal) {
+      toast(refusal, 'error');
+      return undefined;
+    }
+    expandDest(dest);
+    return mutate(
+      () => api.post<{ moved: number }>(`${V1}/explorer/move`, { items: refs(items), to: dest }),
+      ALL_KINDS,
+      `Moved ${itemsName(items)} to ${destNameFor(tree, dest, items)}`,
+    );
+  };
+
+  /** A selected row carries the whole selection along; any other row goes alone. */
+  const dragGroup = (lead: Item) => ({ lead, items: selected.length > 1 && selection.has(keyOf(lead)) ? selected : [lead] });
+  const onDragStart = (e: DragStartEvent) => {
+    const item = e.active.data.current?.item as Item | undefined;
+    if (item) setDragging(dragGroup(item));
+  };
+  const onDragEnd = (e: DragEndEvent) => {
+    setDragging(null);
+    const item = e.active.data.current?.item as Item | undefined;
+    const over = e.over?.id ? String(e.over.id) : null;
+    if (!item || !over) return;
+    const group = dragGroup(item);
+    let dest: Dest;
+    if (over === 'drop-root') dest = { folderId: null };
+    else if (over.startsWith('drop-folder-')) dest = { folderId: Number(over.slice(12)) };
+    else if (over.startsWith('drop-epoch-')) dest = { epochId: Number(over.slice(11)) };
+    else return;
+    // Dropped back on one of the rows being dragged: nothing to do.
+    const onto = 'epochId' in dest ? `epoch-${dest.epochId}` : dest.folderId !== null ? `folder-${dest.folderId}` : null;
+    if (onto && group.items.some((i) => keyOf(i) === onto)) return;
+    if (group.items.length > 1) return void moveItems(group.items, dest);
+    void moveItem(group.items[0], dest);
+    if (!('epochId' in dest) && dest.folderId !== null) expand(`folder-${dest.folderId}`);
+  };
 
   const open = (item: Item) => {
     if (item.kind === 'task') openTask(item.id);
@@ -336,7 +419,7 @@ export function ExplorerPage() {
       };
     } else if (i.kind === 'epoch') {
       // The epochs list knows how much time was logged directly on the epoch; the tree's copy doesn't.
-      const e = epochs.find((x) => x.id === i.id) ?? tree.epochs.find((x) => x.id === i.id);
+      const e = epochs?.find((x) => x.id === i.id) ?? tree.epochs.find((x) => x.id === i.id);
       question = epochDeleteQuestion(e ?? { name: i.name, total: 0, folderId: null }, tree.folders);
       url += '?deleteTime=true'; // the question says so; without it the server refuses when such time exists
     } else if (i.kind === 'task') {
@@ -350,17 +433,93 @@ export function ExplorerPage() {
       question = { title: 'Delete file?', body: `"${i.name}" will be deleted. This can't be undone.`, confirmLabel: 'Delete file' };
     }
     if (!(await askConfirm(question))) return;
-    const key = `${i.kind}-${i.id}`;
-    const rows = [...document.querySelectorAll<HTMLElement>('[data-row]')].map((el) => el.dataset.row ?? '');
-    const at = rows.indexOf(key);
-    const neighbours = at < 0 ? [] : [rows[at + 1], rows[at - 1]].filter((k): k is string => !!k && k !== key);
+    const key = keyOf(i);
+    const neighbours = neighboursOf(new Set([key]));
     if ((await mutate(() => api.del(`${V1}/${url}`), ALL_KINDS)) !== undefined) refocusAfterRemoval(key, neighbours);
   };
 
-  /** Copy and Duplicate: asks the server what a copy would make first, and asks before making a lot. */
-  const copyItem = async (item: Item, dest: Dest, verb: 'Copy' | 'Duplicate') => {
-    const where = destName(tree, dest, item.kind);
-    const body = { item: { kind: item.kind, id: item.id }, to: dest };
+  /** Deletes several items in one request, all or nothing, after one question that says what goes and what stays. */
+  const removeItems = async (items: Item[]) => {
+    if (items.length === 1) return remove(items[0]);
+    const n = items.length;
+    const count = (k: Kind) => items.filter((i) => i.kind === k).length;
+    const picked = new Set(items.map(keyOf));
+    // Sub-tasks of the tasks picked that aren't picked themselves.
+    const subtasks = tree.tasks.filter((t) => t.parentId !== null && picked.has(`task-${t.parentId}`) && !picked.has(`task-${t.id}`)).length;
+    // The epochs list knows how much time was logged directly on each epoch; the tree doesn't.
+    const picks = items.filter((i) => i.kind === 'epoch').map((i) => epochs?.find((e) => e.id === i.id));
+    const direct = picks.every(Boolean) ? picks.reduce((sum, e) => sum + (e?.loggedDirectMinutes ?? 0), 0) : null;
+    const [tasks, files, folders, epochCount] = [count('task'), count('file'), count('folder'), count('epoch')];
+    const gone =
+      tasks && files ? 'The tasks and files are deleted for good, the tasks with their checklists, comments, links and logged time.'
+      : tasks ? `${tasks === 1 ? 'The task is' : 'The tasks are'} deleted for good, with ${tasks === 1 ? 'its' : 'their'} checklist${tasks === 1 ? '' : 's'}, comments, links and logged time.`
+      : files ? `${files === 1 ? 'The file is' : 'The files are'} deleted for good.`
+      : '';
+    const body = (
+      <>
+        <p>These {n} items will be deleted: {describeKinds(items)}.</p>
+        <ul className="confirm-list">
+          {items.slice(0, 10).map((i) => (
+            <li key={keyOf(i)}>
+              {ICONS[i.kind]} {i.name}
+            </li>
+          ))}
+          {n > 10 && <li className="muted">and {n - 10} more</li>}
+        </ul>
+        {gone && <p>{gone} This can't be undone.</p>}
+        {folders > 0 && (
+          <p>
+            {folders === 1
+              ? 'Anything else in the folder is kept and moves up to the folder it is in (at the top level, its tasks go to the Inbox).'
+              : 'Anything else in the folders is kept and moves up to the folder each one is in (at the top level, their tasks go to the Inbox).'}
+          </p>
+        )}
+        {epochCount > 0 && (
+          <p>
+            {epochCount === 1
+              ? "The epoch's other tasks and their logged time are kept and move to the folder the epoch is in (at the top level, to the Inbox)."
+              : "The epochs' other tasks and their logged time are kept and move to the folder each epoch is in (at the top level, to the Inbox)."}{' '}
+            {direct === null
+              ? `Any time logged directly on the ${epochCount === 1 ? 'epoch is deleted with it' : 'epochs is deleted with them'}.`
+              : direct > 0 &&
+                `The ${formatMinutes(direct)} logged directly on the ${epochCount === 1 ? 'epoch is deleted with it' : 'epochs is deleted with them'}.`}
+          </p>
+        )}
+        {subtasks > 0 && <p>{plural(subtasks, 'sub-task')} of these tasks will stay, as top-level tasks, unless you tick the box.</p>}
+      </>
+    );
+    const options: ConfirmOptions = {
+      title: `Delete ${n} items?`,
+      body,
+      confirmLabel: `Delete ${n} items`,
+      // Many tasks at once (as on the board): make sure it isn't a slip.
+      typeToConfirm: tasks > 10 ? 'delete' : undefined,
+    };
+    let withSubtasks = false;
+    if (subtasks > 0) {
+      const answer = await askConfirm({ ...options, checkbox: `Also delete their ${plural(subtasks, 'sub-task')}` });
+      if (!answer.ok) return;
+      withSubtasks = answer.checked;
+    } else if (!(await askConfirm(options))) return;
+    const neighbours = neighboursOf(picked);
+    // deleteTime: the question said what happens to time logged directly on the epochs.
+    const done = await mutate(
+      () => api.post(`${V1}/explorer/delete`, { items: refs(items), withSubtasks, deleteTime: true }),
+      ALL_KINDS,
+      `Deleted ${n} items`,
+    );
+    if (done !== undefined) refocusAfterRemoval(keyOf(items[0]), neighbours);
+  };
+
+  /**
+   * Copy and Duplicate (`dest` null: each copy next to its original). Asks the server what the copy would make
+   * first, and asks before making a lot.
+   */
+  const copyItems = async (items: Item[], dest: Dest | null, verb: 'Copy' | 'Duplicate') => {
+    const one = items.length === 1 ? items[0] : null;
+    const where = dest ? destNameFor(tree, dest, items) : one ? destName(tree, placeOf(tree, one), one.kind) : '';
+    const at = where ? `in ${where}` : 'next to the originals';
+    const body = { items: refs(items), to: dest ?? { inPlace: true } };
     let counts: CopyCounts;
     try {
       counts = await api.post<CopyCounts>(`${V1}/copy`, { ...body, dryRun: true });
@@ -368,29 +527,32 @@ export function ExplorerPage() {
       toast(errorMessage(err), 'error');
       return;
     }
-    if (copyNeedsConfirm(counts)) {
+    if (copyNeedsConfirm(counts, items.length)) {
       const n = counts.subtasksElsewhere;
-      const parents = item.kind === 'task' ? 'the copy' : 'the copies';
+      const parents = one?.kind === 'task' ? 'the copy' : 'the copies';
       const except = !n
         ? ''
         : n === 1
           ? `, except one sub-task, which goes where its original is (as a sub-task of ${parents})`
           : `, except ${n} sub-tasks, which go where their originals are (as sub-tasks of ${parents})`;
       const ok = await askConfirm({
-        title: `${verb} “${item.name}”?`,
+        title: `${verb} ${itemsName(items)}?`,
         body:
-          `This makes ${describeCounts(counts)}${counts.bytes ? ` (${formatBytes(counts.bytes)} of files)` : ''} in ${where}${except}.` +
+          `This makes ${describeCounts(counts)}${counts.bytes ? ` (${formatBytes(counts.bytes)} of files)` : ''} ${at}${except}.` +
           (counts.tasks ? ' The new tasks start in Open with their checklists unticked; logged time, comments and links stay with the originals.' : ''),
         confirmLabel: verb,
         danger: false,
       });
       if (!ok) return;
     }
-    const made = await mutate(() => api.post<CopyCounts & { item: Item }>(`${V1}/copy`, body), ALL_KINDS);
+    if (dest) expandDest(dest);
+    const made = await mutate(() => api.post<CopyCounts & { items: Item[] }>(`${V1}/copy`, body), ALL_KINDS);
     if (!made) return;
-    expandDest(dest);
-    const renamed = made.item.name !== item.name ? ` as “${made.item.name}”` : '';
-    toast(verb === 'Copy' ? `Copied “${item.name}” to ${where}${renamed}` : `Duplicated “${item.name}”${renamed}`);
+    if (one) {
+      const copy = made.items[0];
+      const renamed = copy && copy.name !== one.name ? ` as “${copy.name}”` : '';
+      toast(verb === 'Copy' ? `Copied “${one.name}” to ${where}${renamed}` : `Duplicated “${one.name}”${renamed}`);
+    } else toast(verb === 'Copy' ? `Copied ${items.length} items to ${where}` : `Duplicated ${items.length} items`);
   };
 
   const paste = async (target: Target, fromKeyboard: boolean) => {
@@ -406,14 +568,19 @@ export function ExplorerPage() {
       dest = pasteDestination(clip, place, tree);
     }
     if (!dest) return toast(pasteRefusal(clip, place), 'error');
-    if (clip.mode === 'copy') return copyItem(clip.item, dest, 'Copy');
-    if ((await moveItem(clip.item, dest)) === undefined) return;
+    if (clip.mode === 'copy') return copyItems(clip.items, dest, 'Copy');
+    if (clip.items.length > 1) {
+      if ((await moveItems(clip.items, dest)) !== undefined) setClip(null);
+      return;
+    }
+    const [item] = clip.items;
+    if ((await moveItem(item, dest)) === undefined) return;
     setClip(null);
     expandDest(dest);
-    toast(`Moved “${clip.item.name}” to ${destName(tree, dest, clip.item.kind)}`);
+    toast(`Moved “${item.name}” to ${destName(tree, dest, item.kind)}`);
   };
 
-  /** Runs a menu entry or a shortcut. */
+  /** Runs a menu entry, a shortcut or a button of the selection bar. */
   const run = (id: ActionId, target: Target, fromKeyboard = false) => {
     const folderId = target.kind === 'folder' ? target.id : null;
     switch (id) {
@@ -435,12 +602,30 @@ export function ExplorerPage() {
         return void paste(target, fromKeyboard);
     }
     if (target.kind === 'root' || target.kind === 'inbox') return;
+    // One row, or every selected row.
+    const items = target.kind === 'selection' ? target.items : [target];
+    switch (id) {
+      case 'cut':
+      case 'copy':
+        return setClip({ mode: id, items });
+      case 'duplicate':
+        return void copyItems(items, null, 'Duplicate');
+      case 'move':
+        return setMoving(items);
+      case 'delete':
+        return void removeItems(items);
+      case 'clear-selection':
+        return selection.clear();
+    }
+    if (target.kind === 'selection') return;
     const item = target;
     switch (id) {
       case 'open':
         return open(item);
       case 'toggle':
-        return toggle(`${item.kind}-${item.id}`);
+        return toggle(keyOf(item));
+      case 'select':
+        return selection.toggle(keyOf(item));
       case 'add-subtask': {
         const t = tree.tasks.find((x) => x.id === item.id);
         if (t) setNewTask({ parentId: t.id, parentLabel: `${t.key} “${t.title}”`, epochId: t.epochId, folderId: t.epochId ? null : t.folderId });
@@ -453,19 +638,16 @@ export function ExplorerPage() {
       }
       case 'download':
         return window.location.assign(`/api/v1/files/${item.id}/content?download=1`);
-      case 'cut':
-      case 'copy':
-        return setClip({ mode: id, item });
-      case 'duplicate':
-        return void copyItem(item, placeOf(tree, item), 'Duplicate');
-      case 'move':
-        return setMoving(item);
       case 'rename':
         return void rename(item);
-      case 'delete':
-        return void remove(item);
     }
   };
+
+  /** A row that is one of several selected stands for all of them: menus and shortcuts act on the selection. */
+  const forSelection = (target: Target): Target =>
+    target.kind !== 'root' && target.kind !== 'inbox' && target.kind !== 'selection' && selected.length > 1 && selection.has(keyOf(target))
+      ? { kind: 'selection', items: selected }
+      : target;
 
   /** A floating menu, or the sheet when the last tap was a finger. */
   const showActions = (target: Target, at: MenuPosition, returnFocus: HTMLElement | null, viaPointer: boolean, toggleFrom?: HTMLElement) => {
@@ -475,6 +657,12 @@ export function ExplorerPage() {
   };
 
   const events: RowEvents = {
+    click: (e, item) => {
+      // Select mode, Ctrl/⌘+click and Shift+click pick rows; a plain click opens.
+      if (selection.mode || e.ctrlKey || e.metaKey || e.shiftKey) return selection.toggle(keyOf(item), e.shiftKey);
+      open(item);
+    },
+    check: (item, range) => selection.toggle(keyOf(item), range),
     open,
     context: (e, target, row) => {
       if (e.shiftKey) return; // Shift+right-click: the browser's own menu
@@ -482,13 +670,13 @@ export function ExplorerPage() {
       e.stopPropagation();
       if (Date.now() - menuKeyAt.current < 600) return; // the menu key's own event, after the key opened ours
       row?.focus({ preventScroll: true });
-      showActions(target, { x: e.clientX, y: e.clientY }, row, true);
+      showActions(forSelection(target), { x: e.clientX, y: e.clientY }, row, true);
     },
     more: (e, target) => {
       e.stopPropagation();
       const button = e.currentTarget;
       // detail is 0 for a press of Enter or Space, which is never a finger.
-      showActions(target, { anchor: button, align: 'end' }, button, e.detail !== 0, button);
+      showActions(forSelection(target), { anchor: button, align: 'end' }, button, e.detail !== 0, button);
     },
     keys: (e, target) => {
       const mod = (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey;
@@ -509,8 +697,9 @@ export function ExplorerPage() {
       if (id === 'menu') {
         const row = e.currentTarget;
         menuKeyAt.current = Date.now();
-        showActions(target, { anchor: row.querySelector<HTMLElement>('.name') ?? row, align: 'start' }, row, false);
-      } else run(id, target, true);
+        showActions(forSelection(target), { anchor: row.querySelector<HTMLElement>('.name') ?? row, align: 'start' }, row, false);
+      } else if (id === 'paste' || id === 'rename') run(id, target, true);
+      else run(id, forSelection(target), true);
     },
   };
 
@@ -518,104 +707,113 @@ export function ExplorerPage() {
     explorerActions(target, {
       tree,
       clip,
-      expanded: (target.kind === 'folder' || target.kind === 'epoch') && expanded.has(`${target.kind}-${target.id}`),
+      expanded: (target.kind === 'folder' || target.kind === 'epoch') && expanded.has(keyOf(target)),
+      selected: target.kind !== 'root' && target.kind !== 'inbox' && target.kind !== 'selection' && selection.has(keyOf(target)),
       hasTemplates: templates.length > 0,
     });
-  const isCut = (kind: Kind, id: number) => clip?.mode === 'cut' && clip.item.kind === kind && clip.item.id === id;
+  const isCut = (item: Item) => clip?.mode === 'cut' && clip.items.some((i) => i.kind === item.kind && i.id === item.id);
 
-  const renderFolderContents = (folderId: number | null, depth: number): ReactNode => {
-    const folders = tree.folders.filter((f) => f.parentId === folderId);
-    const folderEpochs = tree.epochs.filter((e) => e.folderId === folderId);
-    const tasks = tree.tasks.filter((t) => t.folderId === folderId && t.epochId === null && folderId !== null);
-    const files = tree.files.filter((f) => f.folderId === folderId);
-    return (
-      <>
-        {folders.map((f) => {
-          const key = `folder-${f.id}`;
-          const isOpen = expanded.has(key);
-          return (
-            <div key={key}>
-              <Row item={{ kind: 'folder', id: f.id, name: f.name }} depth={depth} twisty={isOpen ? '▾' : '▸'} onTwisty={() => toggle(key)} droppableId={`drop-folder-${f.id}`}
-                events={events} dragging={dragging} cut={isCut('folder', f.id)} />
-              {isOpen && renderFolderContents(f.id, depth + 1)}
-            </div>
-          );
-        })}
-        {folderEpochs.map((e) => {
-          const key = `epoch-${e.id}`;
-          const isOpen = expanded.has(key);
-          const epochTasks = tree.tasks.filter((t) => t.epochId === e.id);
-          return (
-            <div key={key}>
-              <Row item={{ kind: 'epoch', id: e.id, name: e.name }} depth={depth} twisty={isOpen ? '▾' : '▸'} onTwisty={() => toggle(key)}
-                droppableId={`drop-epoch-${e.id}`} events={events} dragging={dragging} cut={isCut('epoch', e.id)}
-                icon={<span style={{ color: e.color }}>◆</span>} extra={<span className="tiny muted">{e.shipped}/{e.total}</span>} />
-              {isOpen && epochTasks.map((t) => <TaskRow key={t.id} t={t} depth={depth + 1} events={events} dragging={dragging} cut={isCut('task', t.id)} />)}
-              {isOpen && !epochTasks.length && <div className="tiny muted" style={{ paddingLeft: (depth + 1) * 18 + 40 }}>No tasks</div>}
-            </div>
-          );
-        })}
-        {tasks.map((t) => <TaskRow key={t.id} t={t} depth={depth} events={events} dragging={dragging} cut={isCut('task', t.id)} />)}
-        {files.map((f) => (
-          <Row key={`file-${f.id}`} item={{ kind: 'file', id: f.id, name: f.name }} depth={depth} events={events} dragging={dragging} cut={isCut('file', f.id)}
-            extra={<span className="tiny muted">{formatBytes(f.size)}</span>} />
-        ))}
-      </>
-    );
+  const renderRow = (row: TreeRow) => {
+    if (row.type === 'empty') {
+      return <div key={row.key} className="tiny muted" style={{ paddingLeft: row.depth * 18 + 40 }}>No tasks</div>;
+    }
+    const { item, depth, key } = row;
+    const props = { item, depth, events, dragging: draggingKeys, cut: isCut(item), selected: selection.has(key), selecting: selection.active };
+    switch (item.kind) {
+      case 'folder':
+        return <Row key={key} {...props} twisty={row.open ? '▾' : '▸'} onTwisty={() => toggle(key)} droppableId={`drop-folder-${item.id}`} />;
+      case 'epoch': {
+        const e = lookups.epochs.get(item.id);
+        return (
+          <Row key={key} {...props} twisty={row.open ? '▾' : '▸'} onTwisty={() => toggle(key)} droppableId={`drop-epoch-${item.id}`}
+            icon={<span style={{ color: e?.color }}>◆</span>} extra={<span className="tiny muted">{e?.shipped}/{e?.total}</span>} />
+        );
+      }
+      case 'task': {
+        const t = lookups.tasks.get(item.id);
+        return (
+          <Row key={key} {...props} icon={<span className="dot" style={{ background: t ? colors.status(t.status) : undefined }} />}
+            extra={<span className="key">{t?.key}</span>} />
+        );
+      }
+      case 'file': {
+        const f = lookups.files.get(item.id);
+        return <Row key={key} {...props} extra={<span className="tiny muted">{f ? formatBytes(f.size) : ''}</span>} />;
+      }
+    }
   };
 
-  const inbox = tree.tasks.filter((t) => t.folderId === null && t.epochId === null);
   /** Right-click on the empty part of the tree (rows handle their own). */
   const areaMenu = (target: Target) => (e: MouseEvent<HTMLElement>) => events.context(e, target, null);
-  const pasteWhere = clip?.item.kind === 'task' ? 'a folder, an epoch or the Inbox' : 'a folder or Root';
+  const pasteWhere = clip?.items.every((i) => i.kind === 'task') ? 'a folder, an epoch or the Inbox' : 'a folder or Root';
+  const clipLabel = clip && (clip.items.length === 1 ? `${ICONS[clip.items[0].kind]} ${clip.items[0].name}` : `${clip.items.length} items (${describeKinds(clip.items)})`);
 
   return (
     <>
       <PageHeader title="Explorer">
+        <button type="button" className={cx('btn btn-sm select-toggle', selection.mode && 'on')} aria-pressed={selection.mode}
+          title={`Pick several items, to move, copy or delete them at once (or ${SHORTCUTS.select} them)`}
+          onClick={() => (selection.mode ? selection.clear() : selection.setMode(true))}>
+          Select
+        </button>
         <button className="btn btn-sm" aria-haspopup="menu" onClick={(e) => events.more(e, { kind: 'root' })}>+ New</button>
       </PageHeader>
-      <div className="content">
-        <DndContext sensors={sensors} onDragStart={(e) => setDragging((e.active.data.current?.item as Item) ?? null)} onDragEnd={onDragEnd} onDragCancel={() => setDragging(null)}>
-          <div className="stack">
-            <p className="small muted" style={{ margin: 0 }}>
-              <span className="hide-mobile">Right-click an item, or use its <b>⋯</b>,</span>
-              <span className="hide-desktop">Tap the <b>⋯</b> on an item</span> to add, cut, copy, paste, duplicate, rename or delete. Drag the{' '}
-              <b>⠿</b> handle to move it onto a folder, an epoch (tasks only) or “Root”.
-            </p>
-            {clip && (
-              <div className="clip-chip" role="status">
-                <span aria-hidden="true">{clip.mode === 'cut' ? '✂' : '📋'}</span>
-                <span className="grow clip-text">
-                  {clip.mode === 'cut' ? 'Cut' : 'Copied'}: <b>{ICONS[clip.item.kind]} {clip.item.name}</b>
-                  <span className="muted hide-mobile"> · right-click {pasteWhere} → Paste, or pick it and press {SHORTCUTS.paste}</span>
-                  <span className="muted hide-desktop"> · ⋯ on {pasteWhere} → Paste</span>
-                </span>
-                <button type="button" className="btn btn-ghost btn-sm" onClick={() => setClip(null)} title="Esc">Clear</button>
-              </div>
-            )}
-            <RootRow events={events}>
-              <div className="tree card" style={{ padding: 4 }} onContextMenu={areaMenu({ kind: 'root' })}>
-                {renderFolderContents(null, 0)}
-                {!tree.folders.length && !tree.epochs.length && !tree.files.length && (
-                  <div className="empty">Empty. Create a folder, epoch or upload files with “+ New”.</div>
-                )}
-              </div>
-            </RootRow>
-            <div>
-              <div className="row">
-                <div className="section-title grow">Inbox — unfiled tasks ({inbox.length})</div>
-                <MoreButton label="Actions for the Inbox" target={{ kind: 'inbox' }} events={events} />
-              </div>
-              <div className="tree card" style={{ padding: 4 }} onContextMenu={areaMenu({ kind: 'inbox' })}>
-                {inbox.map((t) => <TaskRow key={t.id} t={t} depth={0} events={events} dragging={dragging} cut={isCut('task', t.id)} />)}
-                {!inbox.length && <div className="empty small">Nothing here.</div>}
+      <div className="content flush">
+        <div className="explorer-scroll">
+          <DndContext sensors={sensors} onDragStart={onDragStart} onDragEnd={onDragEnd} onDragCancel={() => setDragging(null)}>
+            <div className="stack">
+              <p className="small muted" style={{ margin: 0 }}>
+                <span className="hide-mobile">Right-click an item, or use its <b>⋯</b>,</span>
+                <span className="hide-desktop">Tap the <b>⋯</b> on an item</span> to add, cut, copy, paste, duplicate, rename or delete. Drag the{' '}
+                <b>⠿</b> handle to move it onto a folder, an epoch (tasks only) or “Root”.{' '}
+                <span className="hide-mobile"><b>{SHORTCUTS.select}</b> or <b>Shift+click</b> items to select several.</span>
+                <span className="hide-desktop">Tap <b>Select</b> to pick several.</span>
+              </p>
+              {clip && (
+                <div className="clip-chip" role="status">
+                  <span aria-hidden="true">{clip.mode === 'cut' ? '✂' : '📋'}</span>
+                  <span className="grow clip-text">
+                    {clip.mode === 'cut' ? 'Cut' : 'Copied'}: <b>{clipLabel}</b>
+                    <span className="muted hide-mobile"> · right-click {pasteWhere} → Paste, or pick it and press {SHORTCUTS.paste}</span>
+                    <span className="muted hide-desktop"> · ⋯ on {pasteWhere} → Paste</span>
+                  </span>
+                  <button type="button" className="btn btn-ghost btn-sm" onClick={() => setClip(null)} title="Esc">Clear</button>
+                </div>
+              )}
+              <RootRow events={events}>
+                <div className="tree card" style={{ padding: 4 }} onContextMenu={areaMenu({ kind: 'root' })}>
+                  {rows.map(renderRow)}
+                  {!tree.folders.length && !tree.epochs.length && !tree.files.length && (
+                    <div className="empty">Empty. Create a folder, epoch or upload files with “+ New”.</div>
+                  )}
+                </div>
+              </RootRow>
+              <div>
+                <div className="row">
+                  <div className="section-title grow">Inbox — unfiled tasks ({inbox.length})</div>
+                  <MoreButton label="Actions for the Inbox" target={{ kind: 'inbox' }} events={events} />
+                </div>
+                <div className="tree card" style={{ padding: 4 }} onContextMenu={areaMenu({ kind: 'inbox' })}>
+                  {inbox.map(renderRow)}
+                  {!inbox.length && <div className="empty small">Nothing here.</div>}
+                </div>
               </div>
             </div>
-          </div>
-          <DragOverlay>
-            {dragging && <div className="tree-row card drag-overlay"><span className="ico">{ICONS[dragging.kind]}</span><span className="name">{dragging.name}</span></div>}
-          </DragOverlay>
-        </DndContext>
+            <DragOverlay>
+              {dragging && (
+                <div className={cx('drag-stack tree-drag', dragging.items.length > 1 && 'many')}>
+                  <div className="tree-row card drag-overlay">
+                    <span className="ico">{ICONS[dragging.lead.kind]}</span>
+                    <span className="name">{dragging.lead.name}</span>
+                  </div>
+                  {dragging.items.length > 1 && <span className="drag-count" aria-hidden>+{dragging.items.length - 1}</span>}
+                </div>
+              )}
+            </DragOverlay>
+          </DndContext>
+        </div>
+        <SelectionBar selection={selection} items={selected} total={orderedKeys.length}
+          onAction={(id) => run(id, selected.length === 1 ? selected[0] : { kind: 'selection', items: selected })} />
       </div>
 
       <input ref={uploadRef} type="file" multiple hidden onChange={(e) => { void upload(e.target.files, uploadTarget); e.target.value = ''; }} />
@@ -635,14 +833,17 @@ export function ExplorerPage() {
       )}
       {sheetFor && (
         <ActionSheet
-          title={sheetFor.kind === 'root' ? 'Top level' : sheetFor.kind === 'inbox' ? 'Inbox' : sheetFor.name}
+          title={sheetFor.kind === 'root' ? 'Top level' : sheetFor.kind === 'inbox' ? 'Inbox' : sheetFor.kind === 'selection' ? `${sheetFor.items.length} selected` : sheetFor.name}
           nodes={actionsFor(sheetFor)}
           footer={sheetFor.kind === 'folder' ? <p className="tiny muted" style={{ margin: 0 }}>{folderPath(tree.folders, sheetFor.id)}</p> : undefined}
           onPick={(id) => run(id, sheetFor)}
           onClose={() => setSheetFor(null)}
         />
       )}
-      {moving && <MoveDialog item={moving} tree={tree} onClose={() => setMoving(null)} onPick={(dest) => { void moveItem(moving, dest); setMoving(null); }} />}
+      {moving && (
+        <MoveDialog items={moving} tree={tree} onClose={() => setMoving(null)}
+          onPick={(dest) => { void (moving.length > 1 ? moveItems(moving, dest) : moveItem(moving[0], dest)); setMoving(null); }} />
+      )}
       {preview && (
         <FilePreview
           key={preview.file.id}
@@ -663,14 +864,42 @@ export function ExplorerPage() {
   );
 }
 
-function TaskRow({ t, depth, events, dragging, cut }: {
-  t: Tree['tasks'][number]; depth: number; events: RowEvents; dragging: Item | null; cut: boolean;
+/** The bar under the tree while items are selected: what can be done to all of them at once. */
+function SelectionBar({ selection, items, total, onAction }: {
+  selection: Selection<string>;
+  /** The selected items, in the order shown. */
+  items: Item[];
+  /** How many rows are shown. */
+  total: number;
+  onAction: (id: ActionId) => void;
 }) {
-  const colors = useColors();
+  if (!selection.active) return null;
+  const n = items.length;
+  const button = (id: ActionId, label: string, className = '') => (
+    <button type="button" className={cx('btn btn-sm', className)} disabled={!n} onClick={() => onAction(id)}>{label}</button>
+  );
   return (
-    <Row item={{ kind: 'task', id: t.id, name: t.title }} depth={depth} events={events} dragging={dragging} cut={cut}
-      icon={<span className="dot" style={{ background: colors.status(t.status) }} />}
-      extra={<span className="key">{t.key}</span>} />
+    <div className="bulk-bar" role="toolbar" aria-label="Act on the selected items">
+      <div className="bulk-head">
+        <b aria-live="polite">{n ? `${n} selected` : 'Click or tap items to select them'}</b>
+        {n > 1 && <span className="small muted hide-mobile">{describeKinds(items)}</span>}
+        {n < total && (
+          <button type="button" className="btn btn-ghost btn-sm" onClick={selection.selectAll}>
+            Select all {total}
+          </button>
+        )}
+        <button type="button" className="btn btn-ghost btn-sm" onClick={selection.clear} title="Shortcut: Esc" aria-keyshortcuts="Escape">
+          {selection.mode ? 'Done' : 'Clear'}
+        </button>
+      </div>
+      <div className="bulk-actions">
+        {button('move', 'Move to…')}
+        {button('cut', 'Cut')}
+        {button('copy', 'Copy')}
+        {button('duplicate', 'Duplicate')}
+        {button('delete', 'Delete', 'btn-danger')}
+      </div>
+    </div>
   );
 }
 
@@ -707,20 +936,32 @@ function RootRow({ events, children }: { events: RowEvents; children: ReactNode 
   );
 }
 
-function Row({ item, depth, twisty, onTwisty, droppableId, events, dragging, cut, icon, extra }: {
+function Row({ item, depth, twisty, onTwisty, droppableId, events, dragging, cut, selected, selecting, icon, extra }: {
   item: Item; depth: number; twisty?: string; onTwisty?: () => void; droppableId?: string;
-  events: RowEvents; dragging: Item | null; cut: boolean; icon?: ReactNode; extra?: ReactNode;
+  events: RowEvents;
+  /** The rows being dragged. */
+  dragging: ReadonlySet<string> | null;
+  cut: boolean;
+  selected: boolean;
+  /** Something is selected (or Select mode is on): every row shows its checkbox. */
+  selecting: boolean;
+  icon?: ReactNode; extra?: ReactNode;
 }) {
-  const drag = useDraggable({ id: `${item.kind}-${item.id}`, data: { item } });
-  const drop = useDroppable({ id: droppableId ?? `nodrop-${item.kind}-${item.id}`, disabled: !droppableId });
-  const isSelf = dragging?.kind === item.kind && dragging.id === item.id;
+  const key = keyOf(item);
+  const drag = useDraggable({ id: key, data: { item } });
+  const drop = useDroppable({ id: droppableId ?? `nodrop-${key}`, disabled: !droppableId });
+  const isSelf = dragging?.has(key) ?? false;
   return (
     <div
       ref={drop.setNodeRef}
-      className={cx('tree-row', drop.isOver && !isSelf && 'drop-over', isSelf && 'dragging', cut && 'cut')}
-      data-row={`${item.kind}-${item.id}`}
+      className={cx('tree-row', drop.isOver && !isSelf && 'drop-over', isSelf && 'dragging', cut && 'cut', selected && 'selected')}
+      data-row={key}
       style={{ paddingLeft: 8 + depth * 18 }}
-      onClick={() => events.open(item)}
+      onClick={(e) => events.click(e, item)}
+      // Shift+click picks a range: don't let the browser select text as well.
+      onMouseDown={(e) => {
+        if (e.shiftKey) e.preventDefault();
+      }}
       onContextMenu={(e) => events.context(e, item, e.currentTarget)}
       // Keyboard: Enter/Space opens (folders expand), arrows expand/collapse, Shift+F10 or the menu key opens
       // the menu, F2 renames, Delete deletes, Ctrl+C / X / V copy, cut and paste.
@@ -737,6 +978,20 @@ function Row({ item, depth, twisty, onTwisty, droppableId, events, dragging, cut
         } else events.keys(e, item);
       }}
     >
+      {selecting && (
+        <input
+          type="checkbox"
+          className="select-box"
+          checked={selected}
+          aria-label={`Select ${item.name}`}
+          onChange={noop}
+          // Ticked here, where Shift is known; React wants an onChange on a controlled box.
+          onClick={(e) => {
+            e.stopPropagation();
+            events.check(item, e.shiftKey);
+          }}
+        />
+      )}
       {/* Pointer/touch only (no keyboard drag sensor), so it is not a tab stop. */}
       <span ref={drag.setNodeRef} {...drag.listeners} className="drag-handle" onClick={(e) => e.stopPropagation()} aria-hidden="true">
         ⠿
@@ -750,33 +1005,32 @@ function Row({ item, depth, twisty, onTwisty, droppableId, events, dragging, cut
   );
 }
 
-function MoveDialog({ item, tree, onClose, onPick }: {
-  item: Item; tree: Tree; onClose: () => void; onPick: (d: { folderId: number | null } | { epochId: number }) => void;
-}) {
-  // A folder cannot move into itself or its descendants.
+function MoveDialog({ items, tree, onClose, onPick }: { items: Item[]; tree: Tree; onClose: () => void; onPick: (d: Dest) => void }) {
+  // A folder cannot move into itself or a folder inside it.
   const blocked = useMemo(() => {
     const set = new Set<number>();
-    if (item.kind !== 'folder') return set;
     const walk = (id: number) => {
       set.add(id);
       tree.folders.filter((f) => f.parentId === id).forEach((f) => walk(f.id));
     };
-    walk(item.id);
+    for (const i of items) if (i.kind === 'folder') walk(i.id);
     return set;
-  }, [item, tree.folders]);
+  }, [items, tree.folders]);
   const folders = tree.folders.filter((f) => !blocked.has(f.id)).map((f) => ({ id: f.id, path: folderPath(tree.folders, f.id) }))
     .sort((a, b) => a.path.localeCompare(b.path));
+  const tasksOnly = items.every((i) => i.kind === 'task');
+  const someTasks = items.some((i) => i.kind === 'task');
   return (
-    <Sheet title={`Move “${item.name}”`} onClose={onClose} variant="center">
+    <Sheet title={`Move ${itemsName(items)}`} onClose={onClose} variant="center">
       <div className="stack" style={{ gap: 6 }}>
         <button className="btn" style={{ justifyContent: 'flex-start' }} onClick={() => onPick({ folderId: null })}>
-          {item.kind === 'task' ? '📥 Inbox (unfiled)' : '🏠 Root'}
+          {tasksOnly ? '📥 Inbox (unfiled)' : someTasks ? '🏠 Root (tasks go to the Inbox)' : '🏠 Root'}
         </button>
         {folders.map((f) => (
           <button key={f.id} className="btn" style={{ justifyContent: 'flex-start' }} onClick={() => onPick({ folderId: f.id })}>📁 {f.path}</button>
         ))}
-        {item.kind === 'task' && tree.epochs.length > 0 && <div className="section-title">Epochs</div>}
-        {item.kind === 'task' && tree.epochs.map((e) => (
+        {tasksOnly && tree.epochs.length > 0 && <div className="section-title">Epochs</div>}
+        {tasksOnly && tree.epochs.map((e) => (
           <button key={e.id} className="btn" style={{ justifyContent: 'flex-start' }} onClick={() => onPick({ epochId: e.id })}>
             <span style={{ color: e.color }}>◆</span> {e.name}
           </button>

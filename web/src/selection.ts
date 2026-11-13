@@ -2,29 +2,31 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { isSheetOpen } from './components/Sheet';
 
 /**
- * Selecting several tasks on the board or in the list, to change them all at once (components/BulkBar).
+ * Selecting several things to act on them at once: tasks on the board or in the list (components/BulkBar),
+ * or items in the Explorer (pages/Explorer).
  *
- * - The checkbox on a card or row ticks it; Shift ticks every task between it and the last one ticked,
- *   in the order they are shown (board: column by column, top to bottom).
+ * - The checkbox on a card or row ticks it; Shift ticks everything between it and the last one ticked, in the
+ *   order they are shown (board: column by column, top to bottom).
  * - Ctrl/Cmd+click on a card or row ticks it too, and Shift+click picks a range; a plain click still opens it.
- * - Esc clears the selection and Ctrl/Cmd+A selects every task shown, unless a field or a dialog has the keys.
- * - Phones have no hover or Ctrl: their Select button turns on a mode where a tap ticks instead of opening.
+ * - Esc clears the selection and Ctrl/Cmd+A selects everything shown, unless a field or a dialog has the keys.
+ * - Select mode (the Select button): a click or tap ticks instead of opening. Phones have no hover or Ctrl.
  */
-export interface TaskSelection {
-  /** Selected ids, in the order the tasks are shown. */
-  ids: number[];
-  has: (id: number) => boolean;
+export interface Selection<K extends string | number> {
+  /** Selected ids, in the order shown. */
+  ids: K[];
+  has: (id: K) => boolean;
   /** Something is selected, or Select mode is on: checkboxes show and the bar is up. */
   active: boolean;
-  /** Select mode (phones): a tap on a task ticks it instead of opening it. */
+  /** Select mode: a click or tap ticks instead of opening. */
   mode: boolean;
   setMode: (on: boolean) => void;
-  /** Ticks or unticks a task. `range`: also ticks every task between it and the last one ticked. */
-  toggle: (id: number, range?: boolean) => void;
+  /** Ticks or unticks one. `range`: also ticks everything between it and the last one ticked. */
+  toggle: (id: K, range?: boolean) => void;
   selectAll: () => void;
   /** Unticks everything and leaves Select mode. */
   clear: () => void;
 }
+export type TaskSelection = Selection<number>;
 
 /** Keys pressed in a text field belong to the field. Checkboxes and buttons don't count. */
 function isTyping(target: EventTarget | null): boolean {
@@ -33,13 +35,14 @@ function isTyping(target: EventTarget | null): boolean {
   return target instanceof HTMLInputElement && !['checkbox', 'radio', 'button', 'submit', 'reset'].includes(target.type);
 }
 
-/** `ordered`: the ids of the tasks shown, in the order shown. Keep it memoised. */
-export function useTaskSelection(ordered: number[]): TaskSelection {
-  const [picked, setPicked] = useState<ReadonlySet<number>>(() => new Set());
-  const [anchor, setAnchor] = useState<number | null>(null);
+/** `ordered`: the ids of what is shown, in the order shown. Keep it memoised. */
+export function useSelection<K extends string | number>(ordered: K[]): Selection<K> {
+  const [picked, setPicked] = useState<ReadonlySet<K>>(() => new Set());
+  const [anchor, setAnchor] = useState<K | null>(null);
   const [mode, setMode] = useState(false);
 
-  // Tasks no longer shown (deleted, moved out of an epoch's board, filtered out) leave the selection.
+  // What is no longer shown (deleted, moved out of an epoch's board, filtered out, in a folder just closed)
+  // leaves the selection, so nothing hidden is ever acted on.
   useEffect(() => {
     const shown = new Set(ordered);
     setPicked((prev) => {
@@ -52,7 +55,7 @@ export function useTaskSelection(ordered: number[]): TaskSelection {
   const active = picked.size > 0 || mode;
 
   const toggle = useCallback(
-    (id: number, range = false) => {
+    (id: K, range = false) => {
       setPicked((prev) => {
         const next = new Set(prev);
         const from = range && anchor !== null ? ordered.indexOf(anchor) : -1;
@@ -96,7 +99,10 @@ export function useTaskSelection(ordered: number[]): TaskSelection {
   }, [active]);
 
   return useMemo(
-    () => ({ ids, has: (id: number) => picked.has(id), active, mode, setMode, toggle, selectAll, clear }),
+    () => ({ ids, has: (id: K) => picked.has(id), active, mode, setMode, toggle, selectAll, clear }),
     [ids, picked, active, mode, toggle, selectAll, clear],
   );
 }
+
+/** Tasks on the board or in the list, by id. */
+export const useTaskSelection = (ordered: number[]): TaskSelection => useSelection(ordered);

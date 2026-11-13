@@ -4,39 +4,44 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import type { AppContext } from '../context.ts';
-import type { ProjectTable } from '../access.ts';
 import type { DB } from '../db.ts';
 import { tx } from '../db.ts';
 import { requireAuth } from '../auth.ts';
 import { badRequest, conflict } from '../lib/errors.ts';
+import { itemSchema, itemsSchema, outermost, resolveItems, type ItemRef, type Kind } from './explorer.ts';
 import { isTextFile } from './files.ts';
 import { isDescendant } from './structure.ts';
 import { createTask, keyOf } from './tasks.ts';
 
 /**
- * Copies a folder (with everything in it), an epoch (with its tasks), a task (with its sub-tasks) or a file
- * into a folder, or a task into an epoch. Used by the Explorer's Copy / Paste and Duplicate.
+ * Copies folders (with everything in them), epochs (with their tasks), tasks (with their sub-tasks) and files
+ * into a folder, or tasks into an epoch, or each next to its original. Used by the Explorer's Copy / Paste and
+ * Duplicate, for one item or several at once.
  *
  * - Copied tasks get new keys and start in the first status, checklists unticked; time, comments, links and
  *   activity stay with the originals. A sub-task copied with its parent goes under the copy; one copied
  *   without it keeps its parent. Sub-tasks living in other epochs are copied too, into those epochs.
  * - Every file gets its own copy of the stored content. Links to /api/v1/files/<id> in copied documents and
  *   descriptions are pointed at the copies when the file they point at was copied too.
- * - Only the item copied is renamed, to "Name (copy)", and only when the name is taken where it lands.
+ * - Only the items asked for are renamed, to "Name (copy)", and only when the name is taken where they land.
+ *   What is inside one of the items (a folder's contents, an epoch's tasks, a task's sub-tasks) is copied
+ *   once, with it, even when it was asked for too.
  * - All or nothing: the stored files are copied first, the rows in one transaction, and the new stored files
  *   are removed again if anything fails.
  */
 
 export const COPY_LIMITS = { items: 2000, bytes: 500 * 1024 * 1024 };
 
-type Kind = 'folder' | 'epoch' | 'task' | 'file';
-const TABLE: Record<Kind, ProjectTable> = { folder: 'folders', epoch: 'epochs', task: 'tasks', file: 'files' };
-const LABEL: Record<Kind, string> = { folder: 'Folder', epoch: 'Epoch', task: 'Task', file: 'File' };
-
 interface CopyBody {
-  item: { kind: Kind; id: number };
-  /** A folder (null: the top level; for tasks, the Inbox), or for tasks an epoch. */
-  to: { folderId?: number | null; epochId?: number };
+  /** One item… */
+  item?: ItemRef;
+  /** …or several. */
+  items?: ItemRef[];
+  /**
+   * A folder (null: the top level; for tasks, the Inbox), for tasks an epoch, or `inPlace`: each copy next to
+   * its original (what Duplicate does).
+   */
+  to: { folderId?: number | null; epochId?: number; inPlace?: boolean };
   /** Only count what would be created. */
   dryRun?: boolean;
 }
@@ -65,8 +70,19 @@ const FILE_LINK = /(\/api\/v1\/files\/)(\d+)(?=[/?#"')\s\]]|$)/g;
 
 const count = (p: Plan) => p.folders.length + p.epochs.length + p.tasks.length + p.files.length;
 
-/** Everything a copy of `item` creates, parents before what is inside them. */
-function collect(db: DB, pid: number, item: CopyBody['item']): Plan {
+/** Where an item is now: the folder it is in, or a task's epoch. Undefined once it is gone. */
+function placeNow(db: DB, kind: Kind, id: number): Place | undefined {
+  if (kind === 'task') {
+    const r = db.prepare('SELECT epoch_id, folder_id FROM tasks WHERE id = ?').get(id) as { epoch_id: number | null; folder_id: number | null } | undefined;
+    return r && { epochId: r.epoch_id, folderId: r.epoch_id === null ? r.folder_id : null };
+  }
+  const sql = kind === 'folder' ? 'SELECT parent_id AS f FROM folders WHERE id = ?' : `SELECT folder_id AS f FROM ${kind === 'epoch' ? 'epochs' : 'files'} WHERE id = ?`;
+  const r = db.prepare(sql).get(id) as { f: number | null } | undefined;
+  return r && { epochId: null, folderId: r.f };
+}
+
+/** Everything a copy of the items creates, parents before what is inside them. No item may be inside another (outermost). */
+function collect(db: DB, pid: number, items: ItemRef[]): Plan {
   const plan: Plan = { folders: [], epochs: [], tasks: [], files: [], bytes: 0 };
   const taskIds = new Set<number>();
   const addTasks = (rows: TaskRow[]) => {
@@ -86,29 +102,32 @@ function collect(db: DB, pid: number, item: CopyBody['item']): Plan {
     }
   };
 
-  if (item.kind === 'folder') {
-    const queue = [db.prepare('SELECT id, parent_id, name, sort_order FROM folders WHERE id = ?').get(item.id) as unknown as FolderRow];
-    while (queue.length) {
-      const f = queue.shift()!;
-      plan.folders.push(f);
-      queue.push(
-        ...(db.prepare('SELECT id, parent_id, name, sort_order FROM folders WHERE project_id = ? AND parent_id = ? ORDER BY sort_order, id').all(pid, f.id) as unknown as FolderRow[]),
-      );
-      for (const e of epochsIn(f.id)) {
-        plan.epochs.push(e);
-        addTasks(tasksIn('epoch_id = ?', e.id));
+  for (const item of items) {
+    if (item.kind === 'folder') {
+      const queue = [db.prepare('SELECT id, parent_id, name, sort_order FROM folders WHERE id = ?').get(item.id) as unknown as FolderRow];
+      while (queue.length) {
+        const f = queue.shift()!;
+        plan.folders.push(f);
+        queue.push(
+          ...(db.prepare('SELECT id, parent_id, name, sort_order FROM folders WHERE project_id = ? AND parent_id = ? ORDER BY sort_order, id').all(pid, f.id) as unknown as FolderRow[]),
+        );
+        for (const e of epochsIn(f.id)) {
+          plan.epochs.push(e);
+          addTasks(tasksIn('epoch_id = ?', e.id));
+        }
+        addTasks(tasksIn('epoch_id IS NULL AND folder_id = ?', f.id));
+        plan.files.push(...(db.prepare(`SELECT ${FILE_COLS} FROM files WHERE project_id = ? AND folder_id = ? ORDER BY name, id`).all(pid, f.id) as unknown as FileRow[]));
+        tooMany();
       }
-      addTasks(tasksIn('epoch_id IS NULL AND folder_id = ?', f.id));
-      plan.files.push(...(db.prepare(`SELECT ${FILE_COLS} FROM files WHERE project_id = ? AND folder_id = ? ORDER BY name, id`).all(pid, f.id) as unknown as FileRow[]));
-      tooMany();
+    } else if (item.kind === 'epoch') {
+      plan.epochs.push(db.prepare('SELECT * FROM epochs WHERE id = ?').get(item.id) as unknown as EpochRow);
+      addTasks(tasksIn('epoch_id = ?', item.id));
+    } else if (item.kind === 'task') {
+      addTasks([db.prepare(`SELECT ${TASK_COLS} FROM tasks WHERE id = ?`).get(item.id) as unknown as TaskRow]);
+    } else {
+      plan.files.push(db.prepare(`SELECT ${FILE_COLS} FROM files WHERE id = ?`).get(item.id) as unknown as FileRow);
     }
-  } else if (item.kind === 'epoch') {
-    plan.epochs.push(db.prepare('SELECT * FROM epochs WHERE id = ?').get(item.id) as unknown as EpochRow);
-    addTasks(tasksIn('epoch_id = ?', item.id));
-  } else if (item.kind === 'task') {
-    addTasks([db.prepare(`SELECT ${TASK_COLS} FROM tasks WHERE id = ?`).get(item.id) as unknown as TaskRow]);
-  } else {
-    plan.files.push(db.prepare(`SELECT ${FILE_COLS} FROM files WHERE id = ?`).get(item.id) as unknown as FileRow);
+    tooMany();
   }
 
   // Sub-tasks come along with their parents (one level only, so no deeper search).
@@ -147,14 +166,14 @@ export function registerCopyRoutes(app: FastifyInstance, ctx: AppContext): void 
       schema: {
         body: {
           type: 'object',
-          required: ['item', 'to'],
+          required: ['to'],
           properties: {
-            item: {
+            item: itemSchema,
+            items: itemsSchema,
+            to: {
               type: 'object',
-              required: ['kind', 'id'],
-              properties: { kind: { type: 'string', enum: ['folder', 'epoch', 'task', 'file'] }, id: { type: 'integer', minimum: 1 } },
+              properties: { folderId: { type: ['integer', 'null'], minimum: 1 }, epochId: { type: 'integer', minimum: 1 }, inPlace: { type: 'boolean' } },
             },
-            to: { type: 'object', properties: { folderId: { type: ['integer', 'null'], minimum: 1 }, epochId: { type: 'integer', minimum: 1 } } },
             dryRun: { type: 'boolean' },
           },
         },
@@ -162,27 +181,39 @@ export function registerCopyRoutes(app: FastifyInstance, ctx: AppContext): void 
     },
     async (req, reply) => {
       const { actor } = requireAuth(req);
-      const { item, to, dryRun } = req.body;
-      const pid = access.of(req, TABLE[item.kind], item.id, `${LABEL[item.kind]} ${item.id}`).id;
+      const { item, items: several, to, dryRun } = req.body;
+      if ((item === undefined) === (several === undefined)) throw badRequest('Send "item": {"kind", "id"}, or "items": a list of them');
+      const { pid, items } = resolveItems(req, ctx, item ? [item] : several!);
 
-      if ((to.epochId === undefined) === (to.folderId === undefined)) {
-        throw badRequest('Say where the copy goes: "to": {"folderId": a folder id, or null for the top level} or, for a task, {"epochId": id}');
+      const inPlace = to.inPlace === true;
+      if ([to.folderId !== undefined, to.epochId !== undefined, inPlace].filter(Boolean).length !== 1) {
+        throw badRequest(
+          'Say where the copy goes: "to": {"folderId": a folder id, or null for the top level}, for tasks {"epochId": id}, ' +
+            'or {"inPlace": true} for each copy next to its original',
+        );
       }
-      let dest: Place;
+      // Only the outermost items: what is inside one of them is copied with it.
+      const tops = outermost(db, pid, items, { subtasks: true });
+      /** Where the copies go; null: each next to its original. */
+      let dest: Place | null = null;
       if (to.epochId !== undefined) {
-        if (item.kind !== 'task') throw badRequest('Only tasks can go inside an epoch');
+        if (items.some((i) => i.kind !== 'task')) throw badRequest('Only tasks can go inside an epoch');
         access.inProject('epochs', to.epochId, pid, `Epoch ${to.epochId}`);
         dest = { epochId: to.epochId, folderId: null };
-      } else {
+      } else if (!inPlace) {
         const folderId = to.folderId ?? null;
         if (folderId !== null) access.inProject('folders', folderId, pid, `Folder ${folderId}`);
-        if (item.kind === 'folder' && folderId !== null && isDescendant(db, item.id, folderId)) {
-          throw badRequest("A folder can't be copied into itself or into a folder inside it");
+        for (const f of tops) {
+          if (f.kind === 'folder' && folderId !== null && isDescendant(db, f.id, folderId)) {
+            throw badRequest(tops.length === 1 ? "A folder can't be copied into itself or into a folder inside it" : `"${f.name}" can't be copied into itself or into a folder inside it`);
+          }
         }
         dest = { epochId: null, folderId };
       }
 
-      const plan = collect(db, pid, item);
+      const plan = collect(db, pid, tops);
+      const topKeys = new Set(tops.map((t) => `${t.kind}-${t.id}`));
+      const isTop = (kind: Kind, id: number) => topKeys.has(`${kind}-${id}`);
       const taskById = new Map(plan.tasks.map((t) => [t.id, t]));
       const epochIds = new Set(plan.epochs.map((e) => e.id));
       const folderIds = new Set(plan.folders.map((f) => f.id));
@@ -199,7 +230,7 @@ export function registerCopyRoutes(app: FastifyInstance, ctx: AppContext): void 
         files: plan.files.length,
         bytes: plan.bytes,
         // Sub-tasks living in another epoch or folder: their copies go there, under the parent's copy.
-        subtasksElsewhere: plan.tasks.filter((t) => !(item.kind === 'task' && item.id === t.id) && !inCopy(t) && !withParent(t)).length,
+        subtasksElsewhere: plan.tasks.filter((t) => !isTop('task', t.id) && !inCopy(t) && !withParent(t)).length,
       };
       if (dryRun) return { ok: true, dryRun: true, ...counts };
 
@@ -231,10 +262,17 @@ export function registerCopyRoutes(app: FastifyInstance, ctx: AppContext): void 
         }
 
         // 2. Rows, all in one transaction.
-        const top = tx(db, () => {
+        const made = tx(db, () => {
           // Checked again: the destination may have been deleted (and its id reused) while files were copied.
-          if (dest.folderId !== null) access.inProject('folders', dest.folderId, pid, `Folder ${dest.folderId}`);
-          if (dest.epochId !== null) access.inProject('epochs', dest.epochId, pid, `Epoch ${dest.epochId}`);
+          if (dest?.folderId != null) access.inProject('folders', dest.folderId, pid, `Folder ${dest.folderId}`);
+          if (dest?.epochId != null) access.inProject('epochs', dest.epochId, pid, `Epoch ${dest.epochId}`);
+          /** Where the copy of an item asked for goes: the destination, or next to the original as it is now. */
+          const destOf = (kind: Kind, id: number): Place => {
+            if (dest) return dest;
+            const here = placeNow(db, kind, id);
+            if (!here) throw conflict(`"${tops.find((t) => t.kind === kind && t.id === id)?.name}" was deleted while it was being copied`);
+            return here;
+          };
           const folders = new Map<number, number>();
           const epochs = new Map<number, number>();
           const files = new Map<number, number>();
@@ -242,14 +280,14 @@ export function registerCopyRoutes(app: FastifyInstance, ctx: AppContext): void 
           const places = new Map<number, Place>();
           const repoint = (text: string) =>
             text.replace(FILE_LINK, (m, prefix: string, id: string) => (files.has(Number(id)) ? `${prefix}${files.get(Number(id))}` : m));
-          const isTop = (kind: Kind, id: number) => item.kind === kind && item.id === id;
           const nextOrder = (table: 'folders' | 'epochs', col: string, parent: number | null) =>
             ((db.prepare(`SELECT MAX(sort_order) AS m FROM ${table} WHERE project_id = ? AND ${col} IS ?`).get(pid, parent) as { m: number | null }).m ?? 0) + 1;
-          let topItem = { kind: item.kind, id: 0, name: '' };
+          /** The copies of the items asked for, by "kind-id" of the original. */
+          const madeTops = new Map<string, { kind: Kind; id: number; name: string }>();
 
           for (const f of plan.folders) {
             const first = isTop('folder', f.id);
-            const parent = first ? dest.folderId : folders.get(f.parent_id!)!;
+            const parent = first ? destOf('folder', f.id).folderId : folders.get(f.parent_id!)!;
             const name = first
               ? freeName(f.name, (n) => !!db.prepare('SELECT 1 FROM folders WHERE project_id = ? AND parent_id IS ? AND name = ? COLLATE NOCASE').get(pid, parent, n), 200)
               : f.name;
@@ -257,12 +295,12 @@ export function registerCopyRoutes(app: FastifyInstance, ctx: AppContext): void 
               .prepare('INSERT INTO folders (project_id, name, parent_id, sort_order) VALUES (?, ?, ?, ?)')
               .run(pid, name, parent, first ? nextOrder('folders', 'parent_id', parent) : f.sort_order);
             folders.set(f.id, Number(res.lastInsertRowid));
-            if (first) topItem = { kind: 'folder', id: Number(res.lastInsertRowid), name };
+            if (first) madeTops.set(`folder-${f.id}`, { kind: 'folder', id: Number(res.lastInsertRowid), name });
           }
 
           for (const f of plan.files) {
             const first = isTop('file', f.id);
-            const folder = first ? dest.folderId : folders.get(f.folder_id!)!;
+            const folder = first ? destOf('file', f.id).folderId : folders.get(f.folder_id!)!;
             const name = first
               ? freeName(f.name, (n) => !!db.prepare('SELECT 1 FROM files WHERE project_id = ? AND folder_id IS ? AND name = ? COLLATE NOCASE').get(pid, folder, n), 255, true)
               : f.name;
@@ -270,7 +308,7 @@ export function registerCopyRoutes(app: FastifyInstance, ctx: AppContext): void 
               .prepare('INSERT INTO files (project_id, folder_id, name, stored_name, mime, size, uploaded_by) VALUES (?, ?, ?, ?, ?, ?, ?)')
               .run(pid, folder, name, stored.get(f.id)!, f.mime, f.size, actor);
             files.set(f.id, Number(res.lastInsertRowid));
-            if (first) topItem = { kind: 'file', id: Number(res.lastInsertRowid), name };
+            if (first) madeTops.set(`file-${f.id}`, { kind: 'file', id: Number(res.lastInsertRowid), name });
           }
           // Now that every copy has an id, write the documents whose links point at other copies.
           for (const [id, text] of relink) {
@@ -283,7 +321,7 @@ export function registerCopyRoutes(app: FastifyInstance, ctx: AppContext): void 
 
           for (const e of plan.epochs) {
             const first = isTop('epoch', e.id);
-            const folder = first ? dest.folderId : folders.get(e.folder_id!)!;
+            const folder = first ? destOf('epoch', e.id).folderId : folders.get(e.folder_id!)!;
             const name = first
               ? freeName(e.name, (n) => !!db.prepare('SELECT 1 FROM epochs WHERE project_id = ? AND folder_id IS ? AND name = ? COLLATE NOCASE').get(pid, folder, n), 200)
               : e.name;
@@ -294,7 +332,7 @@ export function registerCopyRoutes(app: FastifyInstance, ctx: AppContext): void 
               )
               .run(pid, name, repoint(e.description), e.color, folder, e.target_date, e.estimate_minutes, first ? nextOrder('epochs', 'folder_id', folder) : e.sort_order);
             epochs.set(e.id, Number(res.lastInsertRowid));
-            if (first) topItem = { kind: 'epoch', id: Number(res.lastInsertRowid), name };
+            if (first) madeTops.set(`epoch-${e.id}`, { kind: 'epoch', id: Number(res.lastInsertRowid), name });
           }
 
           const checklistOf = db.prepare('SELECT text FROM checklist_items WHERE task_id = ? ORDER BY sort_order, id');
@@ -305,7 +343,7 @@ export function registerCopyRoutes(app: FastifyInstance, ctx: AppContext): void 
             let place: Place;
             if (t.epoch_id !== null && epochs.has(t.epoch_id)) place = { epochId: epochs.get(t.epoch_id)!, folderId: null };
             else if (t.epoch_id === null && t.folder_id !== null && folders.has(t.folder_id)) place = { epochId: null, folderId: folders.get(t.folder_id)! };
-            else if (first) place = dest;
+            else if (first) place = destOf('task', t.id);
             // A sub-task that came with its parent: with the parent's copy if it lived with its parent, else where it was.
             else place = withParent(t) ? places.get(t.parent_id!)! : { epochId: t.epoch_id, folderId: t.folder_id };
             const title = first
@@ -340,16 +378,16 @@ export function registerCopyRoutes(app: FastifyInstance, ctx: AppContext): void 
             );
             tasks.set(t.id, id);
             places.set(t.id, place);
-            if (first) topItem = { kind: 'task', id, name: title };
+            if (first) madeTops.set(`task-${t.id}`, { kind: 'task', id, name: title });
           }
-          return topItem;
+          return tops.map((t) => madeTops.get(`${t.kind}-${t.id}`)!);
         });
 
         for (const [kind, n] of [['folders', counts.folders], ['files', counts.files], ['epochs', counts.epochs], ['tasks', counts.tasks]] as const) {
           if (n) bus.emit({ kind, actor, projectId: pid });
         }
         reply.code(201);
-        return { ok: true, ...counts, item: top };
+        return { ok: true, ...counts, item: made[0], items: made };
       } catch (err) {
         await Promise.all(created.flatMap((name) => [fsp.rm(target(name), { force: true }), fsp.rm(`${target(name)}.part`, { force: true })]));
         throw err;

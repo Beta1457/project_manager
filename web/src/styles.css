@@ -353,6 +353,8 @@ html.resizing, html.resizing * { cursor: col-resize !important; user-select: non
   background: var(--surface); cursor: pointer; user-select: none; touch-action: manipulation;
 }
 .tree-row:hover { background: var(--surface-2); }
+/* Selected rows (Ctrl/Shift+click, Select): tinted, with a bar on the left so a run of them still reads as rows. */
+.tree-row.selected { background: var(--primary-soft); box-shadow: inset 3px 0 0 var(--primary); }
 .tree-row.drop-over { outline: 2px dashed var(--primary); background: var(--primary-soft); }
 .tree-row.dragging { opacity: 0.4; }
 .tree-row .twisty { width: 20px; text-align: center; color: var(--muted); flex: none; }
@@ -360,6 +362,9 @@ html.resizing, html.resizing * { cursor: col-resize !important; user-select: non
 .tree-row .name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tree-row .more { opacity: 0.7; }
 .drag-handle { cursor: grab; color: var(--muted); padding: 0 4px; touch-action: none; font-size: 1.1rem; }
+/* The page scrolls inside this, so the selection bar can sit under it (as on the List page). */
+.explorer-scroll { flex: 1; min-height: 0; overflow: auto; padding: 12px 12px 80px; }
+@media (min-width: 900px) { .explorer-scroll { padding: 16px 20px 100px; } }
 
 /* ---------- Epochs ---------- */
 .epoch-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
@@ -564,9 +569,11 @@ input[type='checkbox'].select-box { flex: none; width: 18px; height: 18px; min-h
 }
 body.selecting-tasks .fab { display: none; }
 
-/* Dragging several cards: a stack under the pointer, with how many more it carries. */
+/* Dragging several cards or Explorer rows: a stack under the pointer, with how many more it carries. */
 .drag-stack { position: relative; }
-.drag-stack.many > .task-card {
+/* An Explorer drag starts on the ⠿ handle, so the preview would be as narrow as the handle: size it to the row's text. */
+.drag-stack.tree-drag { width: max-content; max-width: min(420px, 80vw); }
+.drag-stack.many > .task-card, .drag-stack.many > .tree-row {
   box-shadow: 6px 6px 0 -1px var(--surface), 6px 6px 0 0 var(--border), 12px 12px 0 -1px var(--surface), 12px 12px 0 0 var(--border), var(--shadow-lg);
 }
 .drag-count {

@@ -81,6 +81,58 @@ function nextOrder(db: DB, projectId: number, table: 'folders' | 'epochs', col: 
   return (r.m ?? 0) + 1;
 }
 
+// Moving and deleting folders and epochs: the routes here and the Explorer's bulk routes (explorer.ts) share
+// these, so both follow the same rules. Callers check that the ids are in the project first.
+
+/** Moves a folder into `parentId` (null: the top level), last in the list there. Not into itself or a folder inside it. */
+export function moveFolder(db: DB, projectId: number, id: number, parentId: number | null): void {
+  if (parentId !== null && isDescendant(db, id, parentId)) {
+    throw badRequest('A folder cannot be moved into itself or one of its sub-folders');
+  }
+  db.prepare('UPDATE folders SET parent_id = ?, sort_order = ?, updated_at = ? WHERE id = ?').run(
+    parentId,
+    nextOrder(db, projectId, 'folders', 'parent_id', parentId),
+    nowIso(),
+    id,
+  );
+}
+
+/** Moves an epoch into `folderId` (null: the top level), last in the list there. */
+export function moveEpoch(db: DB, projectId: number, id: number, folderId: number | null): void {
+  db.prepare('UPDATE epochs SET folder_id = ?, sort_order = ?, updated_at = ? WHERE id = ?').run(
+    folderId,
+    nextOrder(db, projectId, 'epochs', 'folder_id', folderId),
+    nowIso(),
+    id,
+  );
+}
+
+/** Deletes a folder but nothing in it: what was inside moves up to its parent (tasks at the top level go to the Inbox). */
+export function deleteFolder(db: DB, id: number): void {
+  tx(db, () => {
+    const { parent_id: parent } = db.prepare('SELECT parent_id FROM folders WHERE id = ?').get(id) as { parent_id: number | null };
+    db.prepare('UPDATE folders SET parent_id = ? WHERE parent_id = ?').run(parent, id);
+    db.prepare('UPDATE epochs SET folder_id = ? WHERE folder_id = ?').run(parent, id);
+    db.prepare('UPDATE tasks SET folder_id = ? WHERE folder_id = ?').run(parent, id);
+    db.prepare('UPDATE files SET folder_id = ? WHERE folder_id = ?').run(parent, id);
+    db.prepare('DELETE FROM folders WHERE id = ?').run(id);
+  });
+}
+
+/** How many time entries are logged directly on an epoch (not on its tasks): deleting the epoch deletes them. */
+export function directTimeEntries(db: DB, epochId: number): number {
+  return (db.prepare('SELECT COUNT(*) AS n FROM time_entries WHERE epoch_id = ?').get(epochId) as { n: number }).n;
+}
+
+/** Deletes an epoch but not its tasks: they move to the epoch's folder (or the Inbox). Time logged directly on it goes with it. */
+export function deleteEpoch(db: DB, id: number): void {
+  tx(db, () => {
+    const { folder_id: folderId } = db.prepare('SELECT folder_id FROM epochs WHERE id = ?').get(id) as { folder_id: number | null };
+    db.prepare('UPDATE tasks SET epoch_id = NULL, folder_id = ?, updated_at = ? WHERE epoch_id = ?').run(folderId, nowIso(), id);
+    db.prepare('DELETE FROM epochs WHERE id = ?').run(id);
+  });
+}
+
 interface EpochBody {
   name?: string;
   description?: string;
@@ -188,15 +240,17 @@ export function registerStructureRoutes(app: FastifyInstance, ctx: AppContext): 
       if (b.color !== undefined) set('color', assertColor(b.color));
       if (has(b, 'targetDate')) set('target_date', parseDate(b.targetDate));
       if (has(b, 'estimate') || has(b, 'estimateMinutes')) set('estimate_minutes', estimateFrom(b));
-      if (has(b, 'folderId')) {
-        const folderId = b.folderId ?? null;
-        assertFolder(folderId, project.id);
-        set('folder_id', folderId);
-        set('sort_order', nextOrder(db, project.id, 'epochs', 'folder_id', folderId));
-      }
-      if (sets.length) {
-        set('updated_at', nowIso());
-        db.prepare(`UPDATE epochs SET ${sets.join(', ')} WHERE id = ?`).run(...vals, id);
+      const moving = has(b, 'folderId');
+      const folderId = b.folderId ?? null;
+      if (moving) assertFolder(folderId, project.id);
+      if (sets.length || moving) {
+        tx(db, () => {
+          if (sets.length) {
+            set('updated_at', nowIso());
+            db.prepare(`UPDATE epochs SET ${sets.join(', ')} WHERE id = ?`).run(...vals, id);
+          }
+          if (moving) moveEpoch(db, project.id, id, folderId);
+        });
         bus.emit({ kind: 'epochs', id, actor });
       }
       return getEpoch(db, id);
@@ -210,24 +264,17 @@ export function registerStructureRoutes(app: FastifyInstance, ctx: AppContext): 
     const epoch = getEpoch(db, id);
     // Tasks survive (they move to the epoch's folder), but time logged directly on the epoch has
     // nowhere to go and is deleted with it, so that must be asked for explicitly.
-    const direct = db.prepare('SELECT COUNT(*) AS n FROM time_entries WHERE epoch_id = ?').get(id) as { n: number };
-    if (direct.n > 0 && req.query.deleteTime !== 'true') {
+    const direct = directTimeEntries(db, id);
+    if (direct > 0 && req.query.deleteTime !== 'true') {
       throw conflict(
-        `Epoch "${epoch.name}" has ${direct.n} time entr${direct.n === 1 ? 'y' : 'ies'} (${epoch.loggedDirectMinutes} min) logged directly on it, ` +
+        `Epoch "${epoch.name}" has ${direct} time entr${direct === 1 ? 'y' : 'ies'} (${epoch.loggedDirectMinutes} min) logged directly on it, ` +
           'which would be deleted too. Retry with ?deleteTime=true to confirm.',
       );
     }
-    tx(db, () => {
-      db.prepare('UPDATE tasks SET epoch_id = NULL, folder_id = ?, updated_at = ? WHERE epoch_id = ?').run(
-        epoch.folderId,
-        nowIso(),
-        id,
-      );
-      db.prepare('DELETE FROM epochs WHERE id = ?').run(id);
-    });
+    deleteEpoch(db, id);
     bus.emit({ kind: 'epochs', id, actor });
     bus.emit({ kind: 'tasks', actor });
-    if (direct.n > 0) bus.emit({ kind: 'time', actor });
+    if (direct > 0) bus.emit({ kind: 'time', actor });
     return { ok: true };
   });
 
@@ -292,15 +339,7 @@ export function registerStructureRoutes(app: FastifyInstance, ctx: AppContext): 
         if (has(b, 'parentId')) {
           const parentId = b.parentId ?? null;
           assertFolder(parentId, project.id);
-          if (parentId !== null && isDescendant(db, id, parentId)) {
-            throw badRequest('A folder cannot be moved into itself or one of its sub-folders');
-          }
-          db.prepare('UPDATE folders SET parent_id = ?, sort_order = ?, updated_at = ? WHERE id = ?').run(
-            parentId,
-            nextOrder(db, project.id, 'folders', 'parent_id', parentId),
-            nowIso(),
-            id,
-          );
+          moveFolder(db, project.id, id, parentId);
         }
       });
       bus.emit({ kind: 'folders', id, actor });
@@ -312,15 +351,7 @@ export function registerStructureRoutes(app: FastifyInstance, ctx: AppContext): 
   app.delete<{ Params: { id: string } }>('/api/v1/folders/:id', async (req) => {
     const { actor } = requireAuth(req);
     const { id } = folderIn(req, req.params.id);
-    const folder = db.prepare('SELECT parent_id FROM folders WHERE id = ?').get(id) as { parent_id: number | null };
-    const parent = folder.parent_id;
-    tx(db, () => {
-      db.prepare('UPDATE folders SET parent_id = ? WHERE parent_id = ?').run(parent, id);
-      db.prepare('UPDATE epochs SET folder_id = ? WHERE folder_id = ?').run(parent, id);
-      db.prepare('UPDATE tasks SET folder_id = ? WHERE folder_id = ?').run(parent, id);
-      db.prepare('UPDATE files SET folder_id = ? WHERE folder_id = ?').run(parent, id);
-      db.prepare('DELETE FROM folders WHERE id = ?').run(id);
-    });
+    deleteFolder(db, id);
     for (const kind of ['folders', 'epochs', 'tasks', 'files'] as const) bus.emit({ kind, actor });
     return { ok: true };
   });

@@ -5,6 +5,7 @@ import crypto from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { AppContext } from '../context.ts';
+import type { DB } from '../db.ts';
 import { nowIso, tx } from '../db.ts';
 import { requireAuth } from '../auth.ts';
 import { badRequest, notFound } from '../lib/errors.ts';
@@ -128,6 +129,23 @@ async function writeStored(dir: string, stored: string, content: string): Promis
 function sanitizeName(name: string): string {
   const base = path.basename(name).replace(/[\u0000-\u001f<>:"/\\|?*]/g, '_').trim();
   return base.slice(0, 255) || 'file';
+}
+
+// Shared with the Explorer's bulk routes (explorer.ts). Callers check that the ids are in the project first.
+
+/** Moves a file into `folderId` (null: the top level). */
+export function moveFile(db: DB, id: number, folderId: number | null): void {
+  db.prepare('UPDATE files SET folder_id = ?, updated_at = ? WHERE id = ?').run(folderId, nowIso(), id);
+}
+
+/**
+ * Deletes a file's row and returns the name its content is stored under. The caller removes that stored file
+ * once the change is committed (backups keep their own copy, so removing the live one is safe).
+ */
+export function deleteFileRow(db: DB, id: number): string {
+  const { stored_name: stored } = db.prepare('SELECT stored_name FROM files WHERE id = ?').get(id) as { stored_name: string };
+  db.prepare('DELETE FROM files WHERE id = ?').run(id);
+  return stored;
 }
 
 export function registerFileRoutes(app: FastifyInstance, ctx: AppContext): void {
@@ -455,7 +473,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: AppContext): void 
       if (moving && folderId !== null) assertFolder(folderId, pid);
       tx(db, () => {
         if (name !== undefined) db.prepare('UPDATE files SET name = ?, updated_at = ? WHERE id = ?').run(name, nowIso(), id);
-        if (moving) db.prepare('UPDATE files SET folder_id = ?, updated_at = ? WHERE id = ?').run(folderId, nowIso(), id);
+        if (moving) moveFile(db, id, folderId);
       });
       bus.emit({ kind: 'files', id, actor });
       return dto(get(id));
@@ -465,9 +483,8 @@ export function registerFileRoutes(app: FastifyInstance, ctx: AppContext): void 
   app.delete<{ Params: { id: string } }>('/api/v1/files/:id', async (req) => {
     const { actor } = requireAuth(req);
     const row = fileIn(req, req.params.id);
-    db.prepare('DELETE FROM files WHERE id = ?').run(row.id);
-    // Backups keep their own copy, so removing the live file is safe.
-    await fsp.rm(path.join(filesDir, row.stored_name), { force: true });
+    const stored = deleteFileRow(db, row.id);
+    await fsp.rm(path.join(filesDir, stored), { force: true });
     bus.emit({ kind: 'files', id: row.id, actor });
     return { ok: true };
   });

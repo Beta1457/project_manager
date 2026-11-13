@@ -12,8 +12,9 @@ A self-hosted project tracker that runs on your own computer or home server. You
   - **Multi-select**: tick several tasks on the board or in the list (or Ctrl/Shift+click; **Select** on phones) to change their status, epoch, priority, type, categories or parent at once, drag them together, or delete them.
 - **Filters**: search (text or a key like `APP-12`), status, type, category, priority, epoch, folder, creator. They live in the URL, so filtered views can be bookmarked.
 - **Epochs**: containers for tasks (a release, a milestone, a feature area), with progress bars, target dates, estimates and their own board.
-- **Explorer**: a folder tree holding folders, epochs, tasks and uploaded files. Drag and drop, or ⋯ → Move to on phones.
+- **Explorer**: a folder tree holding folders, epochs, tasks and uploaded files. Drag and drop, or ⋯ → Move to on phones. A task put in an epoch (dragged, moved or pasted there) joins that epoch's board; moving it to a folder takes it out again.
   - **Right-click menu** (⋯ on phones): add, cut, copy, paste, duplicate, rename or delete anything. Copying a folder copies everything in it, sub-tasks and files included, and documents in the copy point at the copied images. Keyboard shortcuts work too: Ctrl+C / X / V, F2 and Delete.
+  - **Multi-select**: Ctrl+click or Shift+click items of any kind (**Select** on phones), then move, cut, copy, duplicate or delete them together from the bar at the bottom or the right-click menu, or drag them all at once.
   - **Markdown documents** can be created and edited in the browser, and they autosave.
   - **HTML pages and SVGs** show a live preview (Preview/Source tabs, "Open full page"). Upload a page's images, stylesheets and other pages in the same folder layout as on disk, and they load and link to each other. Scripts run sandboxed, with no access to your login or the API.
 - **Images in markdown**: drag, paste, or use 🖼 Add image (camera or gallery on phones) in any markdown field. Images are stored with your files and shown inline.
