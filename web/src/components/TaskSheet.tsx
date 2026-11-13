@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState, type FormEvent, type MouseEvent } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { api, V1 } from '../api';
-import { useEpochs, useFolders, useMeta, useTask, type TaskRef } from '../hooks';
+import { useColors, useEpochs, useFolders, useMeta, useTask, type TaskRef } from '../hooks';
 import { useProject } from '../projectContext';
 import { useToast } from './Toast';
 import { useMutate } from '../mutate';
 import { useTaskParam } from '../taskParam';
 import type { TaskDetail } from '../types';
-import { clip, formatMinutes, joinAnd, plural, timeAgo } from '../util';
+import { clip, contrastText, formatMinutes, joinAnd, plural, timeAgo } from '../util';
 import { useUndoableDelete } from '../undoableDelete';
 import { Markdown, Spinner, StatusPill } from './Bits';
 import { askConfirm } from './Confirm';
@@ -444,6 +444,7 @@ function ParentRow({ task, onPatch }: { task: TaskDetail; onPatch: (body: Record
 function SubtasksSection({ task }: { task: TaskDetail }) {
   const mutate = useMutate();
   const meta = useMeta().data;
+  const colors = useColors();
   const epochs = useEpochs().data ?? [];
   const open = useOpenTask();
   const [mode, setMode] = useState<'idle' | 'new' | 'existing'>('idle');
@@ -470,26 +471,31 @@ function SubtasksSection({ task }: { task: TaskDetail }) {
           </div>
         )}
       </div>
-      {task.children.map((c) => (
-        <div key={c.id} className="link-row subtask-row">
-          <a className="grow ellipsis" href={`?task=${c.id}`} onClick={(e) => open(e, c.id)}>
-            <span className="key">{c.key}</span> {c.title}
-          </a>
-          {c.epochName && c.epochId !== task.epochId && (
-            <span className="tiny muted ellipsis subtask-epoch" title={`Epoch: ${c.epochName}`}>◆ {c.epochName}</span>
-          )}
-          <select
-            className="subtask-status"
-            value={c.status}
-            aria-label={`Status of ${c.key}`}
-            onChange={(e) => void mutate(() => api.post(`${V1}/tasks/${c.id}/status`, { status: e.target.value }), K)}
-          >
-            {meta?.statuses.map((s) => (
-              <option key={s.id} value={s.id}>{s.label}</option>
-            ))}
-          </select>
-        </div>
-      ))}
+      {task.children.map((c) => {
+        const statusColor = colors.status(c.status);
+        return (
+          <div key={c.id} className="link-row subtask-row">
+            <a className="grow ellipsis" href={`?task=${c.id}`} onClick={(e) => open(e, c.id)}>
+              <span className="key">{c.key}</span> {c.title}
+            </a>
+            {c.epochName && c.epochId !== task.epochId && (
+              <span className="tiny muted ellipsis subtask-epoch" title={`Epoch: ${c.epochName}`}>◆ {c.epochName}</span>
+            )}
+            {/* In the status's colour, like the links' status pills; still the dropdown that moves it on the board. */}
+            <select
+              className="subtask-status"
+              value={c.status}
+              aria-label={`Status of ${c.key}`}
+              style={{ backgroundColor: statusColor, borderColor: statusColor, color: contrastText(statusColor) }}
+              onChange={(e) => void mutate(() => api.post(`${V1}/tasks/${c.id}/status`, { status: e.target.value }), K)}
+            >
+              {meta?.statuses.map((s) => (
+                <option key={s.id} value={s.id}>{s.label}</option>
+              ))}
+            </select>
+          </div>
+        );
+      })}
       {mode === 'new' && (
         <form className="link-add stack" style={{ gap: 6 }} onSubmit={add}>
           <div className="row nowrap">

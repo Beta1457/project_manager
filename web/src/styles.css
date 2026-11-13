@@ -328,7 +328,11 @@ html.resizing, html.resizing * { cursor: col-resize !important; user-select: non
 .parent-row a { color: var(--text); min-width: 0; }
 .parent-row a:hover { text-decoration: underline; }
 .subtask-row .subtask-epoch { flex: 0 1 auto; max-width: 30%; }
-.subtask-row .subtask-status { flex: 0 0 auto; width: auto; min-height: 30px; padding: 2px 6px; font-size: 0.8rem; }
+/* The status dropdown is a pill in the status's colour (set inline), like the links' status pills. */
+.subtask-row .subtask-status { flex: 0 0 auto; width: auto; min-height: 30px; padding: 2px 8px; font-size: 0.8rem; font-weight: 600; border-radius: 999px; }
+.subtask-row .subtask-status:focus { outline-offset: 2px; } /* outside the pill, which may be the same colour */
+/* The open list keeps the normal colours (otherwise every option takes the pill's colour). */
+.subtask-row .subtask-status option { background: var(--surface); color: var(--text); }
 .markdown a.task-ref { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.92em; font-weight: 600; }
 .activity { display: grid; gap: 10px; grid-template-columns: minmax(0, 1fr); }
 .activity-item { font-size: 0.875rem; display: grid; gap: 2px; padding-left: 10px; border-left: 2px solid var(--border); }
