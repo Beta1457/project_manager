@@ -142,7 +142,7 @@ export function ListPage() {
                       </td>
                       <td className="key">{t.key}</td>
                       <td>
-                        {t.parent && <span className="tiny muted" title={`Sub-task of ${t.parent.key} "${t.parent.title}"`}>↳ {t.parent.key} </span>}
+                        {t.parent && <span className="tiny sub-mark" title={`Sub-task of ${t.parent.key} "${t.parent.title}"`}>↳ {t.parent.key} </span>}
                         <span style={{ fontWeight: 600 }}>{t.title}</span>
                         {t.subtasks.total > 0 && <span className="tiny muted"> · sub-tasks {t.subtasks.done}/{t.subtasks.total}</span>}
                       </td>

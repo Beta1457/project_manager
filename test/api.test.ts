@@ -844,13 +844,13 @@ test('a task can have several blockers and other links at once', async () => {
   assert.equal((await call('GET', `/api/v1/tasks/${target.id}`)).body.openBlockers, 1);
 });
 
-test('sub-tasks: own epochs, progress, filters, one level in one project, changing the parent', async () => {
+test('sub-tasks: own epochs, progress, filters, nesting in one project, changing the parent', async () => {
   const sprint = (await call('POST', '/api/v1/epochs', { name: 'Card Sprint' })).body;
   const vfx = (await call('POST', '/api/v1/epochs', { name: 'VFX' })).body;
   const parent = (await call('POST', '/api/v1/tasks', { title: 'Card Creation', epochId: sprint.id })).body;
   assert.equal(parent.parent, null);
-  assert.deepEqual(parent.subtasks, { done: 0, total: 0 });
-  assert.deepEqual(parent.children, []);
+  assert.deepEqual(parent.subtasks, { done: 0, total: 0, all: 0 });
+  assert.deepEqual([parent.ancestorIds, parent.ancestors, parent.children], [[], [], []]);
 
   // By key with a token, in an epoch of its own; by id; and an existing task moved under it.
   const fx = await call('POST', '/api/v1/tasks', { title: 'Card VFX', parent: parent.key, epochId: vfx.id }, 'token');
@@ -869,7 +869,7 @@ test('sub-tasks: own epochs, progress, filters, one level in one project, changi
   await call('POST', `/api/v1/tasks/${fx.body.id}/status`, { status: 'Alpha Complete' });
   await call('POST', `/api/v1/tasks/${sfx.id}/status`, { status: 'Alpha QA' });
   const detail = (await call('GET', `/api/v1/tasks/${parent.key}`)).body;
-  assert.deepEqual(detail.subtasks, { done: 1, total: 3 });
+  assert.deepEqual(detail.subtasks, { done: 1, total: 3, all: 3 });
   assert.deepEqual(detail.children.map((c: Json) => c.key), [fx.body.key, sfx.key, art.key]);
   assert.equal(detail.children[1].statusLabel, 'Alpha QA');
   assert.equal(detail.children[0].description, undefined);
@@ -885,16 +885,52 @@ test('sub-tasks: own epochs, progress, filters, one level in one project, changi
   assert.ok(subs.includes(sfx.id) && !subs.includes(parent.id));
   assert.equal((await call('GET', '/api/v1/tasks?parent=T-99999')).status, 404);
 
-  // One level only, never itself; unknown parents are 404.
-  const deep = await call('POST', '/api/v1/tasks', { title: 'Too deep', parent: fx.body.key });
-  assert.equal(deep.status, 400);
-  assert.match(deep.body.error, /can't have sub-tasks of their own/);
+  // Sub-tasks can have sub-tasks of their own. Each task knows the tasks above it, and "all" counts every level,
+  // the same in a task and in the list.
+  const deep = await call('POST', '/api/v1/tasks', { title: 'VFX particles', parent: fx.body.key });
+  assert.equal(deep.status, 201, JSON.stringify(deep.body));
+  assert.deepEqual(deep.body.ancestorIds, [parent.id, fx.body.id]);
+  assert.deepEqual(deep.body.ancestors, [
+    { id: parent.id, key: parent.key, title: 'Card Creation' },
+    { id: fx.body.id, key: fx.body.key, title: 'Card VFX' },
+  ]);
+  assert.deepEqual((await call('GET', `/api/v1/tasks/${parent.id}`)).body.subtasks, { done: 1, total: 3, all: 4 });
+  const listed = (await call('GET', '/api/v1/tasks')).body.tasks as Json[];
+  const inList = (id: number) => listed.find((t) => t.id === id)!;
+  assert.deepEqual(inList(deep.body.id).ancestorIds, [parent.id, fx.body.id]);
+  assert.deepEqual(inList(parent.id).subtasks, { done: 1, total: 3, all: 4 });
+  assert.deepEqual(inList(fx.body.id).subtasks, { done: 0, total: 1, all: 1 });
+
+  // Never itself or one of its own sub-tasks (a loop); unknown parents are 404.
+  const loop = await call('PATCH', `/api/v1/tasks/${parent.id}`, { parent: deep.body.key });
+  assert.equal(loop.status, 400);
+  assert.equal(loop.body.error, `${deep.body.key} is a sub-task of ${parent.key} (or further down), so it can't be ${parent.key}'s parent`);
   const other = (await call('POST', '/api/v1/tasks', { title: 'Other parent' })).body;
-  const busy = await call('PATCH', `/api/v1/tasks/${parent.id}`, { parent: other.key });
-  assert.equal(busy.status, 400);
-  assert.match(busy.body.error, /has sub-tasks of its own/);
   assert.equal((await call('PATCH', `/api/v1/tasks/${other.id}`, { parent: other.id })).status, 400);
   assert.equal((await call('POST', '/api/v1/tasks', { title: 'x', parent: 'T-99999' })).status, 404);
+
+  // A task with sub-tasks can become a sub-task: they move down with it.
+  const nested = await call('PATCH', `/api/v1/tasks/${parent.id}`, { parent: other.key });
+  assert.equal(nested.status, 200, JSON.stringify(nested.body));
+  assert.deepEqual((await call('GET', `/api/v1/tasks/${deep.body.id}`)).body.ancestorIds, [other.id, parent.id, fx.body.id]);
+  assert.equal((await call('GET', `/api/v1/tasks/${other.id}`)).body.subtasks.all, 5);
+  assert.equal((await call('PATCH', `/api/v1/tasks/${parent.id}`, { parent: null })).body.parentId, null);
+
+  // Five levels at most, counting the sub-tasks that would move down with a task.
+  let chain = deep.body;
+  for (const n of [3, 4, 5]) chain = (await call('POST', '/api/v1/tasks', { title: `Depth ${n}`, parent: chain.key })).body;
+  assert.equal(chain.ancestorIds.length, 5);
+  assert.equal((await call('GET', '/api/v1/meta')).body.maxSubtaskDepth, 5);
+  const tooDeep = await call('POST', '/api/v1/tasks', { title: 'Depth 6', parent: chain.key });
+  assert.equal(tooDeep.status, 400);
+  assert.equal(tooDeep.body.error, `${chain.key} is already 5 levels deep, so it can't have sub-tasks (the limit is 5 levels)`);
+  const pair = (await call('POST', '/api/v1/tasks', { title: 'Pair' })).body;
+  await call('POST', '/api/v1/tasks', { title: 'Pair part', parent: pair.key });
+  const [depth3, depth4] = chain.ancestors.slice(3);
+  const over = await call('PATCH', `/api/v1/tasks/${pair.id}`, { parent: depth4.id });
+  assert.equal(over.status, 400);
+  assert.equal(over.body.error, `${pair.key} has sub-tasks 1 level deep, so under ${depth4.key} they would go past the limit of 5 levels`);
+  assert.equal((await call('PATCH', `/api/v1/tasks/${pair.id}`, { parent: depth3.key })).status, 200);
   // A parentId in the body is not how the API takes a parent: it is ignored.
   const plain = (await call('POST', '/api/v1/tasks', { title: 'Plain', parentId: parent.id })).body;
   assert.equal(plain.parentId, null);
@@ -947,6 +983,25 @@ test('sub-tasks: deleting a parent keeps its sub-tasks unless asked, and leaves 
   const o = (await call('GET', `/api/v1/tasks/${outside.id}`)).body;
   assert.equal(o.openBlockers, 0);
   assert.ok(o.activity.some((a: Json) => a.message === `Removed link: ${lMusic.key} "Level music" was deleted`));
+
+  // Deleting a sub-task that has sub-tasks of its own moves them up to its parent, with a note on each side.
+  const quest = await mk('Quest');
+  const step = await mk('Quest step', quest.key);
+  const [partA, partB] = [await mk('Step part A', step.key), await mk('Step part B', step.key)];
+  const detail = await mk('Part A detail', partA.key);
+  assert.deepEqual((await call('DELETE', `/api/v1/tasks/${step.key}`)).body, { ok: true, deleted: 1 });
+  for (const part of [partA, partB]) {
+    const now = (await call('GET', `/api/v1/tasks/${part.id}`)).body;
+    assert.equal(now.parentId, quest.id);
+    assert.equal(now.activity[0].message, `Parent ${step.key} "Quest step" was deleted, so this is now a sub-task of ${quest.key}`);
+  }
+  const q = (await call('GET', `/api/v1/tasks/${quest.id}`)).body;
+  assert.deepEqual(q.subtasks, { done: 0, total: 2, all: 3 });
+  assert.ok(q.activity.some((a: Json) => a.message === `Sub-task ${partA.key} "Step part A" moved here: its parent ${step.key} "Quest step" was deleted`));
+  assert.deepEqual((await call('GET', `/api/v1/tasks/${detail.id}`)).body.ancestorIds, [quest.id, partA.id]);
+  // With withSubtasks, every level goes.
+  assert.deepEqual((await call('DELETE', `/api/v1/tasks/${quest.key}?withSubtasks=true`)).body, { ok: true, deleted: 4 });
+  assert.equal((await call('GET', `/api/v1/tasks/${detail.id}`)).status, 404);
 });
 
 test('templates: save fields or a task, unique names, limits, changes and deletes', async () => {
@@ -1058,7 +1113,7 @@ test('templates: tasks made from one fill in {title}, take overrides, place sub-
   assert.deepEqual(t.categories.map((c: Json) => c.name), ['Combat']);
   assert.deepEqual(t.checklistItems.map((c: Json) => [c.text, c.done]), [['Stats for Fireball', false], ['Playtest', false]]);
   assert.equal(t.epochId, null);
-  assert.deepEqual(t.subtasks, { done: 0, total: 2 });
+  assert.deepEqual(t.subtasks, { done: 0, total: 2, all: 2 });
   assert.deepEqual(t.children.map((c: Json) => c.title), ['Art: Fireball', 'SFX: Fireball']);
   assert.equal(t.children[0].epochId, art.id, 'a sub-task goes to the epoch its template names');
   assert.equal(t.children[0].estimateMinutes, 120);
@@ -1112,7 +1167,7 @@ test('templates: tasks made from one fill in {title}, take overrides, place sub-
   assert.equal((await call('POST', '/api/v1/tasks', { template: 'Fixed' })).body.title, 'Weekly build');
   assert.equal((await call('POST', '/api/v1/tasks', { template: 'fixed', title: 'Hotfix build' })).body.title, 'Hotfix build');
 
-  // Epoch names that are missing or shared are reported; a template with sub-tasks can't make a sub-task.
+  // Epoch names that are missing or shared are reported; a template with sub-tasks makes sub-tasks a level down.
   await call('POST', '/api/v1/templates', { name: 'Lost', epoch: 'Gone' });
   const lost = (await call('POST', '/api/v1/tasks', { template: 'Lost', title: 'Where' })).body;
   assert.equal(lost.epochId, null);
@@ -1124,8 +1179,17 @@ test('templates: tasks made from one fill in {title}, take overrides, place sub-
   assert.equal(twin.epochId, dup1.id);
   assert.match(twin.warnings[0], /several epochs are named "TWIN"; it went to the first one/);
   const asSub = await call('POST', '/api/v1/tasks', { template: 'Card', title: 'Nested', parent: t.key });
-  assert.equal(asSub.status, 400);
-  assert.match(asSub.body.error, /has sub-tasks/);
+  assert.equal(asSub.status, 201, JSON.stringify(asSub.body));
+  assert.equal(asSub.body.parentId, t.id);
+  assert.deepEqual(asSub.body.children.map((c: Json) => c.ancestorIds), [[t.id, asSub.body.id], [t.id, asSub.body.id]]);
+  // Unless they would go past the depth limit: then nothing is made.
+  let under = asSub.body;
+  for (const n of [2, 3, 4]) under = (await call('POST', '/api/v1/tasks', { title: `Template depth ${n}`, parent: under.key })).body;
+  const before = (await call('GET', '/api/v1/tasks')).body.tasks.length;
+  const tooDeep = await call('POST', '/api/v1/tasks', { template: 'Card', title: 'Deepest', parent: under.key });
+  assert.equal(tooDeep.status, 400);
+  assert.equal(tooDeep.body.error, `The template "Card" has sub-tasks, so a task made from it under ${under.key} would go past the limit of 5 levels`);
+  assert.equal((await call('GET', '/api/v1/tasks')).body.tasks.length, before);
   const leaf = await call('POST', '/api/v1/tasks', { template: 'Lost', title: 'Leaf', parent: t.key });
   assert.equal(leaf.status, 201);
   assert.equal(leaf.body.parentId, t.id);
@@ -1168,12 +1232,12 @@ test('bulk: update, move, categories and delete several tasks at once, all or no
   assert.equal(st.status, 200);
   assert.equal((await get(b.id)).activity[0].message, 'Open → Alpha QA: Batch done');
 
-  // All or nothing: the second task can't become a sub-task, so the first one doesn't either.
+  // All or nothing: the second task can't go under its own sub-task, so the first one doesn't move either.
   const parent = await mk('Bulk parent');
   const kid = await mk('Bulk kid', { parent: parent.key });
-  const bad = await bulk({ action: 'update', ids: [a.id, parent.id], set: { parent: b.key } });
+  const bad = await bulk({ action: 'update', ids: [a.id, parent.id], set: { parent: kid.key } });
   assert.equal(bad.status, 400);
-  assert.match(bad.body.error, /has sub-tasks of its own/);
+  assert.equal(bad.body.error, `${kid.key} is a sub-task of ${parent.key} (or further down), so it can't be ${parent.key}'s parent`);
   assert.equal((await get(a.id)).parentId, null, 'the first change was rolled back');
   // A task that doesn't exist fails the request before anything changes.
   assert.equal((await bulk({ action: 'update', ids: [a.id, 999999], set: { priority: 'low' } })).status, 404);
@@ -1182,7 +1246,7 @@ test('bulk: update, move, categories and delete several tasks at once, all or no
   // Sub-tasks of one parent, then top-level again.
   const sub = await bulk({ action: 'update', ids: [a.key, b.key], set: { parent: c.key } });
   assert.deepEqual(sub.body.tasks.map((t: Json) => t.parentId), [c.id, c.id]);
-  assert.deepEqual((await get(c.id)).subtasks, { total: 2, done: 0 });
+  assert.deepEqual((await get(c.id)).subtasks, { total: 2, done: 0, all: 2 });
   const top = await bulk({ action: 'update', ids: [a.key, b.key], set: { parent: null } });
   assert.deepEqual(top.body.tasks.map((t: Json) => t.parentId), [null, null]);
 
@@ -1235,15 +1299,17 @@ test('bulk: update, move, categories and delete several tasks at once, all or no
   off();
   assert.deepEqual(seen.map((e) => [e.kind, e.projectId]), [['tasks', c.projectId]]);
 
-  // Delete: sub-tasks stay (as top-level tasks) unless asked; with withSubtasks they go too.
+  // Delete: sub-tasks stay (as top-level tasks) unless asked; with withSubtasks they go too, at every level.
   const p2 = await mk('Bulk P2');
   const k2 = await mk('Bulk K2', { parent: p2.key });
+  const k3 = await mk('Bulk K3', { parent: k2.key });
   const del = await bulk({ action: 'delete', ids: [parent.id, a.id] });
   assert.deepEqual(del.body, { ok: true, deleted: 2 });
   assert.equal((await get(kid.id)).parentId, null);
-  const delAll = await bulk({ action: 'delete', ids: [p2.key, b.key], withSubtasks: true }, 'token');
-  assert.deepEqual(delAll.body, { ok: true, deleted: 3 });
+  const delAll = await bulk({ action: 'delete', ids: [p2.key, b.key, k3.id], withSubtasks: true }, 'token');
+  assert.deepEqual(delAll.body, { ok: true, deleted: 4 });
   assert.equal((await call('GET', `/api/v1/tasks/${k2.id}`)).status, 404);
+  assert.equal((await call('GET', `/api/v1/tasks/${k3.id}`)).status, 404);
   // A task already gone fails the whole request.
   assert.equal((await bulk({ action: 'delete', ids: [c.id, a.id] })).status, 404);
   assert.equal((await call('GET', `/api/v1/tasks/${c.id}`)).status, 200);
@@ -1328,18 +1394,18 @@ test('copy: a folder with everything in it, epochs, tasks with their sub-tasks a
   assert.equal(fresh.get('Loose art')!.folderId, newArt.id);
   // Sub-tasks: under the parent's copy, with it if they lived with it, else in their own epoch...
   const c2 = await get(fresh.get('Card')!.id);
-  assert.deepEqual([c2.folderId, c2.subtasks], [newSrc, { total: 2, done: 0 }]);
+  assert.deepEqual([c2.folderId, c2.subtasks], [newSrc, { total: 2, done: 0, all: 2 }]);
   const ct2 = await get(fresh.get('Card text')!.id);
   assert.deepEqual([ct2.parentId, ct2.folderId], [c2.id, newSrc]);
   assert.equal(ct2.activity[0].message, `Created in Open as a copy of ${cardText.key} as a sub-task of ${c2.key}`);
   const cv2 = await get(fresh.get('Card VFX')!.id);
   assert.deepEqual([cv2.parentId, cv2.epochId], [c2.id, vfx.id]);
-  assert.deepEqual((await get(card.id)).subtasks, { total: 2, done: 0 });
+  assert.deepEqual((await get(card.id)).subtasks, { total: 2, done: 0, all: 2 });
   // ...and one copied without its parent keeps that parent, which hears about it.
   const o2 = await get(fresh.get('Orphan')!.id);
   assert.deepEqual([o2.parentId, o2.folderId], [outer.id, newArt.id]);
   const outerNow = await get(outer.id);
-  assert.deepEqual(outerNow.subtasks, { total: 2, done: 0 });
+  assert.deepEqual(outerNow.subtasks, { total: 2, done: 0, all: 2 });
   assert.equal(outerNow.activity[0].message, `Added sub-task ${o2.key} "Orphan"`);
 
   // Files: each copy has its own stored content; documents point at the copies of files that were copied too.
@@ -1604,10 +1670,11 @@ test('explorer: delete several items of any kind at once; folders and epochs kee
   assert.equal(k.parentId, null);
   assert.match(k.activity[0].message, /now a top-level task/);
 
-  // withSubtasks deletes sub-tasks too.
+  // withSubtasks deletes sub-tasks too, at every level.
   const p2 = await mk('Del parent 2');
-  await mk('Del kid 2', { parent: p2.key });
-  assert.deepEqual((await del([ref('task', p2)], { withSubtasks: true })).body.deleted, { folders: 0, epochs: 0, tasks: 2, files: 0 });
+  const kid2 = await mk('Del kid 2', { parent: p2.key });
+  await mk('Del grandkid 2', { parent: kid2.key });
+  assert.deepEqual((await del([ref('task', p2)], { withSubtasks: true })).body.deleted, { folders: 0, epochs: 0, tasks: 3, files: 0 });
 
   // A folder and a folder inside it: both go, and what was inside the inner one ends up where the outer one was.
   const x = await folder('Del X');
@@ -1670,6 +1737,15 @@ test('copy: several items at once, each copied once, and duplicates next to thei
   assert.equal(pair.status, 201, JSON.stringify(pair.body));
   assert.equal(pair.body.tasks, 2);
   assert.deepEqual(pair.body.items.map((i: Json) => i.name), ['Copy card']);
+  // At every level: a sub-task of a sub-task comes along with the task at the top, once, under its parent's copy.
+  const detail = await mk('Copy card VFX detail', { folderId: s2.id, parent: vfx.key });
+  const three = await copy({ items: [ref('task', detail), ref('task', card)], to: { folderId: null } });
+  assert.equal(three.status, 201, JSON.stringify(three.body));
+  assert.deepEqual([three.body.tasks, three.body.items.map((i: Json) => i.name)], [3, ['Copy card (copy)']]);
+  const top = (await call('GET', `/api/v1/tasks/${three.body.item.id}`)).body;
+  const mid = (await call('GET', `/api/v1/tasks/${top.children[0].id}`)).body;
+  assert.deepEqual([mid.title, mid.folderId, mid.children.map((c: Json) => c.title)], ['Copy card VFX', s2.id, ['Copy card VFX detail']]);
+  assert.deepEqual([mid.children[0].ancestorIds, mid.children[0].folderId], [[top.id, mid.id], s2.id]);
 
   // Duplicates of items in different places: each copy goes next to its original.
   const inbox = await mk('Copy inbox task');

@@ -67,8 +67,10 @@ export function BulkBar({ selection, tasks, total }: {
 
   const remove = async () => {
     const picked = new Set(ids);
-    // Sub-tasks of the selected tasks that aren't selected themselves.
-    const subtasks = tasks.reduce((sum, t) => sum + t.subtasks.total, 0) - tasks.filter((t) => t.parentId !== null && picked.has(t.parentId)).length;
+    // Sub-tasks at every level below the selected tasks that aren't selected themselves: count below the
+    // outermost selected tasks, then leave out the selected ones found there.
+    const outermost = tasks.filter((t) => !t.ancestorIds.some((a) => picked.has(a)));
+    const subtasks = outermost.reduce((sum, t) => sum + t.subtasks.all, 0) - (tasks.length - outermost.length);
     const logged = tasks.reduce((sum, t) => sum + t.loggedMinutes, 0);
     const goes = [n === 1 ? 'checklist' : 'checklists', 'comments', 'links'];
     if (logged > 0) goes.push(`${formatMinutes(logged)} of logged time`);
@@ -89,7 +91,11 @@ export function BulkBar({ selection, tasks, total }: {
             {n > 10 && <li className="muted">and {n - 10} more</li>}
           </ul>
         )}
-        {subtasks > 0 && <p>{one ? 'Its' : 'Their'} {plural(subtasks, 'sub-task')} will stay, as top-level tasks, unless you tick the box.</p>}
+        {subtasks > 0 && (
+          <p>
+            {one ? 'Its' : 'Their'} {plural(subtasks, 'sub-task')} will stay, moving up to take {one ? 'its' : 'their'} place, unless you tick the box.
+          </p>
+        )}
       </>
     );
     const options = {
@@ -188,13 +194,14 @@ export function BulkBar({ selection, tasks, total }: {
         <Sheet title={`Parent task for ${them}`} variant="center" onClose={() => setPickingParent(false)}>
           <div className="stack">
             <p className="small muted" style={{ margin: 0 }}>
-              They become sub-tasks of the task you pick. A task that has sub-tasks of its own can't become one.
+              They become sub-tasks of the task you pick, and their own sub-tasks move along with them.
             </p>
             <TaskSearch
               label="Find the parent task"
-              params={{ parent: 'none' }}
-              exclude={(t) => ids.includes(t.id)}
-              excludedHint="that aren't selected"
+              // Not a selected task, one below a selected task (that would make a loop) or one too deep to have sub-tasks.
+              exclude={(t) => ids.includes(t.id) || t.ancestorIds.some((a) => ids.includes(a)) || t.ancestorIds.length >= meta.maxSubtaskDepth}
+              excludedHint="that can be their parent"
+              note={(t) => (t.parent ? `↳ ${t.parent.key}` : null)}
               onPick={(t) => {
                 setPickingParent(false);
                 void update({ parent: t.id }, `Made ${them} sub-tasks of ${t.key}`);

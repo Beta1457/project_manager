@@ -290,6 +290,7 @@ export function SaveAsTemplate({ task, onClose }: { task: TaskDetail; onClose: (
           <label className="row nowrap small">
             <input type="checkbox" checked={withSubtasks} onChange={(e) => setWithSubtasks(e.target.checked)} />
             Include its {plural(n, 'sub-task')}
+            {task.subtasks.all > n && ` (not the ${task.subtasks.all - n} below ${n === 1 ? 'it' : 'them'}: a template keeps one level)`}
           </label>
         )}
         <button type="submit" className="btn btn-primary" disabled={!name.trim() || !title.trim() || busy}>Save template</button>

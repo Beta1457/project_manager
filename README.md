@@ -2,13 +2,13 @@
 
 A self-hosted project tracker that runs on your own computer or home server. You use it from a phone or desktop browser, and **your AI coding agent uses it too** (Claude Code, or agents that read `AGENTS.md` such as Codex, Cursor and Copilot): it creates and updates tasks, tracks its time and keeps an architecture diagram in sync while it codes. Your data stays in one folder on your machine, and nothing is sent anywhere else.
 
-![The board: a column per status, each card showing its epoch, key, type, categories, priority, checklist progress and logged time](docs/images/board.png)
+![The board: a column per status, each card showing its epoch, key, type, categories, priority, checklist progress and logged time, and sub-tasks marked with their parent](docs/images/board.png)
 
 - **Projects**: as many as you like, each with its own task keys (`APP-12`, `WEB-3`), board, epochs, files, diagram, task types and categories. Each account only ever sees its own projects.
 - **Kanban board**: Open → In Progress → Alpha QA → Alpha Complete → Beta In Progress → Beta QA → Beta Complete → Ready to Ship. Drag and drop on desktop; on phones, one column at a time with ◀ / Move to… / ▶ buttons.
 - **Tasks**: title, type, status, priority, categories, markdown description, checklist, estimate, links between tasks (blocks / blocked by / duplicates / relates to) and an activity log of who moved what, Claude included.
-  - **Sub-tasks**: full tasks under a parent, each in its own epoch if you like (a card's art and sound in the Art and Audio epochs). The parent shows how many are done.
-  - **Templates**: save a task, sub-tasks included, as a template, then make new ones from it in one go. `{title}` in a template becomes the new task's name.
+  - **Sub-tasks**: full tasks under a parent, each in its own epoch if you like (a card's art and sound in the Art and Audio epochs). Sub-tasks can have sub-tasks of their own, up to 5 levels deep. Board cards mark sub-tasks and name their parent, and the parent shows how many are done.
+  - **Templates**: save a task, with its own sub-tasks, as a template, then make new ones from it in one go. `{title}` in a template becomes the new task's name.
   - **Multi-select**: tick several tasks on the board or in the list (or Ctrl/Shift+click; **Select** on phones) to change their status, epoch, priority, type, categories or parent at once, drag them together, or delete them.
 - **Filters**: search (text or a key like `APP-12`), status, type, category, priority, epoch, folder, creator. They live in the URL, so filtered views can be bookmarked.
 - **Epochs**: containers for tasks (a release, a milestone, a feature area), with progress bars, target dates, estimates and their own board.

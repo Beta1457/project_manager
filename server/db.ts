@@ -229,8 +229,9 @@ const MIGRATIONS: string[] = [
   CREATE INDEX files_project ON files(project_id, folder_id);
   CREATE INDEX diagrams_project ON diagrams(project_id);
   `,
-  // v6: sub-tasks. A task can have one parent in its own project, one level deep (both enforced in the API).
-  // Deleting a parent leaves its sub-tasks as top-level tasks, unless the API is asked to delete them too.
+  // v6: sub-tasks. A task can have one parent in its own project; the API enforces that, keeps out loops and
+  // limits how deep sub-tasks nest. Deleting a parent moves its sub-tasks up a level (to the top level here, if
+  // something deletes it without the API), unless the API is asked to delete them too.
   `
   ALTER TABLE tasks ADD COLUMN parent_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL;
   CREATE INDEX tasks_parent ON tasks(parent_id);

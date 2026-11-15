@@ -132,7 +132,10 @@ export function parseTemplateData(json: string): TemplateData {
   return { ...fill(raw), subtasks: (raw.subtasks ?? []).map(fill) };
 }
 
-/** A task (and its sub-tasks, when asked) as template data. Checklists come along unticked. */
+/**
+ * A task (and its own sub-tasks, when asked) as template data. Checklists come along unticked. Templates hold
+ * one level of sub-tasks, so sub-tasks of those sub-tasks are left out.
+ */
 export function snapshotTask(db: DB, taskId: number, includeSubtasks: boolean): TemplateData {
   const one = (id: number): TemplateTask => {
     const t = db

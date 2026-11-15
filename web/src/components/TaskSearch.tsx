@@ -25,6 +25,8 @@ interface Props {
   exclude?: (task: Task) => boolean;
   /** Ends "No matching tasks …" when every match was excluded ("that aren't already linked"). */
   excludedHint?: string;
+  /** A short note after a match's title, e.g. which task it is a sub-task of now. */
+  note?: (task: Task) => string | null;
   onPick: (task: Task) => void;
   onCancel: () => void;
 }
@@ -33,7 +35,7 @@ interface Props {
  * Finds a task in the current project by title, description or key; a bare number means a key ("12" is
  * APP-12). Enter picks the first match.
  */
-export function TaskSearch({ label, before, params, exclude, excludedHint, onPick, onCancel }: Props) {
+export function TaskSearch({ label, before, params, exclude, excludedHint, note, onPick, onCancel }: Props) {
   const { project } = useProject();
   const [q, setQ] = useState('');
   const term = useDebounced(q.trim(), 250);
@@ -72,12 +74,16 @@ export function TaskSearch({ label, before, params, exclude, excludedHint, onPic
           {search.isFetching && !search.data ? (
             <div className="tiny muted">Searching…</div>
           ) : results.length ? (
-            results.map((t) => (
-              <button key={t.id} type="button" className="link-result" onClick={() => onPick(t)}>
-                <span className="key">{t.key}</span> <span className="grow ellipsis">{t.title}</span>
-                <StatusPill status={t.status} label={t.statusLabel} />
-              </button>
-            ))
+            results.map((t) => {
+              const extra = note?.(t);
+              return (
+                <button key={t.id} type="button" className="link-result" onClick={() => onPick(t)}>
+                  <span className="key">{t.key}</span> <span className="grow ellipsis">{t.title}</span>
+                  {extra && <span className="tiny muted link-result-note">{extra}</span>}
+                  <StatusPill status={t.status} label={t.statusLabel} />
+                </button>
+              );
+            })
           ) : (
             <div className="tiny muted">No matching tasks{search.data?.length && excludedHint ? ` ${excludedHint}` : ''}.</div>
           )}

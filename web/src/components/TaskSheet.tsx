@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent, type MouseEvent } from 'react';
+import { Fragment, useEffect, useRef, useState, type FormEvent, type MouseEvent } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { api, V1 } from '../api';
 import { useColors, useEpochs, useFolders, useMeta, useTask, type TaskRef } from '../hooks';
@@ -7,7 +7,7 @@ import { useToast } from './Toast';
 import { useMutate } from '../mutate';
 import { useTaskParam } from '../taskParam';
 import type { TaskDetail } from '../types';
-import { clip, contrastText, formatMinutes, joinAnd, plural, timeAgo } from '../util';
+import { clip, contrastText, formatMinutes, joinAnd, plural, subtaskDeleteWords, timeAgo } from '../util';
 import { useUndoableDelete } from '../undoableDelete';
 import { Markdown, Spinner, StatusPill } from './Bits';
 import { askConfirm } from './Confirm';
@@ -80,19 +80,20 @@ function DeleteButton({ task, onDone }: { task: TaskDetail; onDone: () => void }
         const goes = ['checklist', 'comments', 'links'];
         if (task.loggedMinutes > 0) goes.push(`${formatMinutes(task.loggedMinutes)} of logged time`);
         const body = `"${task.title}" will be deleted, along with its ${joinAnd(goes)}. This can't be undone.`;
-        const n = task.subtasks.total;
         let url = `${V1}/tasks/${task.id}`;
-        if (n > 0) {
+        if (task.subtasks.total > 0) {
+          // Sub-tasks that stay move up a level, keeping their own sub-tasks.
+          const words = subtaskDeleteWords(task.subtasks.total, task.subtasks.all, task.parent?.key ?? null);
           const answer = await askConfirm({
             title: `Delete ${task.key}?`,
             body: (
               <>
                 <p>{body}</p>
-                <p>Its {plural(n, 'sub-task')} will stay, as top-level tasks, unless you tick the box.</p>
+                <p>{words.stay}</p>
               </>
             ),
             confirmLabel: 'Delete task',
-            checkbox: `Also delete its ${plural(n, 'sub-task')}`,
+            checkbox: words.checkbox,
           });
           if (!answer.ok) return;
           if (answer.checked) url += '?withSubtasks=true';
@@ -337,7 +338,7 @@ function TaskBody({ task }: { task: TaskDetail }) {
         </form>
       </div>
 
-      {!task.parent && <SubtasksSection task={task} />}
+      <SubtasksSection task={task} />
 
       <LinksSection task={task} />
 
@@ -397,19 +398,30 @@ function useOpenTask() {
   };
 }
 
-/** Which task this one is a sub-task of: open it, change it, detach. Top-level tasks with sub-tasks can't have one. */
+/** Which task this one is a sub-task of, and the tasks above that: open them, change the parent, detach. */
 function ParentRow({ task, onPatch }: { task: TaskDetail; onPatch: (body: Record<string, unknown>) => Promise<unknown> }) {
   const open = useOpenTask();
+  const maxDepth = useMeta().data?.maxSubtaskDepth;
   const [picking, setPicking] = useState(false);
-  if (!task.parent && task.subtasks.total > 0) return null;
   return (
     <div>
       <div className="parent-row small">
         <span className="muted">Parent</span>
         {task.parent ? (
-          <a className="grow ellipsis" href={`?task=${task.parent.id}`} onClick={(e) => open(e, task.parent!.id)}>
-            <span className="key">{task.parent.key}</span> {task.parent.title}
-          </a>
+          <span className="grow ellipsis">
+            {/* The path from the top-level task: keys only (titles on hover), then the parent itself. */}
+            {task.ancestors.slice(0, -1).map((a) => (
+              <Fragment key={a.id}>
+                <a href={`?task=${a.id}`} onClick={(e) => open(e, a.id)} title={a.title}>
+                  <span className="key">{a.key}</span>
+                </a>
+                <span className="muted" aria-hidden="true"> › </span>
+              </Fragment>
+            ))}
+            <a href={`?task=${task.parent.id}`} onClick={(e) => open(e, task.parent!.id)}>
+              <span className="key">{task.parent.key}</span> {task.parent.title}
+            </a>
+          </span>
         ) : (
           <span className="grow muted">None (a top-level task)</span>
         )}
@@ -427,9 +439,15 @@ function ParentRow({ task, onPatch }: { task: TaskDetail; onPatch: (body: Record
       {picking && (
         <TaskSearch
           label="Find the parent task"
-          params={{ parent: 'none' }}
-          exclude={(t) => t.id === task.id || t.id === task.parentId}
+          // Not itself, its parent now, a task below it (that would make a loop) or one too deep to have sub-tasks.
+          exclude={(t) =>
+            t.id === task.id ||
+            t.id === task.parentId ||
+            t.ancestorIds.includes(task.id) ||
+            (maxDepth !== undefined && t.ancestorIds.length >= maxDepth)
+          }
           excludedHint="that can be its parent"
+          note={(t) => (t.parent ? `↳ ${t.parent.key}` : null)}
           onPick={async (t) => {
             if (await onPatch({ parent: t.id })) setPicking(false);
           }}
@@ -440,7 +458,7 @@ function ParentRow({ task, onPatch }: { task: TaskDetail; onPatch: (body: Record
   );
 }
 
-/** A top-level task's sub-tasks: open one, change its status, add new ones or move existing tasks under it. */
+/** A task's own sub-tasks: open one, change its status, add new ones or move existing tasks under it. */
 function SubtasksSection({ task }: { task: TaskDetail }) {
   const mutate = useMutate();
   const meta = useMeta().data;
@@ -451,7 +469,10 @@ function SubtasksSection({ task }: { task: TaskDetail }) {
   const [title, setTitle] = useState('');
   // New sub-tasks start in the parent's epoch; pick another for work that belongs elsewhere (VFX, SFX...).
   const [epochId, setEpochId] = useState(task.epochId ? String(task.epochId) : '');
-  const { done, total } = task.subtasks;
+  const { done, total, all } = task.subtasks;
+  // A task on the deepest level sub-tasks can go to can't have sub-tasks of its own.
+  const level = task.ancestorIds.length;
+  const canAdd = meta === undefined || level < meta.maxSubtaskDepth;
 
   const add = async (e: FormEvent) => {
     e.preventDefault();
@@ -463,8 +484,10 @@ function SubtasksSection({ task }: { task: TaskDetail }) {
   return (
     <div>
       <div className="row" style={{ justifyContent: 'space-between' }}>
-        <div className="section-title">Sub-tasks {total > 0 && `(${done}/${total} done)`}</div>
-        {mode === 'idle' && (
+        <div className="section-title">
+          Sub-tasks {total > 0 && `(${done}/${total} done${all > total ? ` · ${all} at all levels` : ''})`}
+        </div>
+        {mode === 'idle' && canAdd && (
           <div className="row" style={{ gap: 6 }}>
             <button className="btn btn-sm" onClick={() => setMode('existing')}>Add existing…</button>
             <button className="btn btn-sm" onClick={() => setMode('new')}>+ Sub-task</button>
@@ -478,6 +501,11 @@ function SubtasksSection({ task }: { task: TaskDetail }) {
             <a className="grow ellipsis" href={`?task=${c.id}`} onClick={(e) => open(e, c.id)}>
               <span className="key">{c.key}</span> {c.title}
             </a>
+            {c.subtasks.total > 0 && (
+              <span className="tiny muted subtask-count" title={`${plural(c.subtasks.total, 'sub-task')} of its own, ${c.subtasks.done} done`}>
+                {plural(c.subtasks.total, 'sub-task')}
+              </span>
+            )}
             {c.epochName && c.epochId !== task.epochId && (
               <span className="tiny muted ellipsis subtask-epoch" title={`Epoch: ${c.epochName}`}>◆ {c.epochName}</span>
             )}
@@ -516,17 +544,22 @@ function SubtasksSection({ task }: { task: TaskDetail }) {
       {mode === 'existing' && (
         <TaskSearch
           label="Find a task to make a sub-task"
-          params={{ parent: 'none' }}
-          exclude={(t) => t.id === task.id || t.subtasks.total > 0}
-          excludedHint="that can become a sub-task"
+          // Not itself, one of its sub-tasks already, or a task above it (that would make a loop).
+          exclude={(t) => t.id === task.id || t.parentId === task.id || task.ancestorIds.includes(t.id)}
+          excludedHint="that can become its sub-task"
+          note={(t) => (t.parent ? `↳ ${t.parent.key}` : null)}
           onPick={async (t) => {
-            if (await mutate(() => api.patch(`${V1}/tasks/${t.id}`, { parent: task.id }), K, `${t.key} is now a sub-task`)) setMode('idle');
+            if (await mutate(() => api.patch(`${V1}/tasks/${t.id}`, { parent: task.id }), K, `${t.key} is now a sub-task of ${task.key}`)) setMode('idle');
           }}
           onCancel={() => setMode('idle')}
         />
       )}
       {mode === 'idle' && total === 0 && (
-        <div className="tiny muted">No sub-tasks. Use them for parts of the work that move across the board on their own or belong in another epoch.</div>
+        <div className="tiny muted">
+          {canAdd
+            ? 'No sub-tasks. Use them for parts of the work that move across the board on their own or belong in another epoch.'
+            : `This task is ${level} levels down, the deepest a sub-task can be, so it can't have sub-tasks of its own.`}
+        </div>
       )}
     </div>
   );

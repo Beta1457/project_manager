@@ -81,18 +81,21 @@ export function TaskCard({ task, onOpen, onStep, onMove, className = '', hideEpo
         <TypeBadge type={task.type} />
       </div>
       {task.parent && (
+        // Says it is a sub-task (in colour, like the Blocked flag) and names its parent, which a click opens.
         <button
           type="button"
           className="parent-chip"
-          title={`Sub-task of ${task.parent.key} "${task.parent.title}". Click to open it.`}
-          aria-label={`Open the parent task, ${task.parent.key} ${task.parent.title}`}
+          title={`Sub-task of ${task.parent.key} "${task.parent.title}"${
+            task.ancestorIds.length > 1 ? `, ${task.ancestorIds.length} levels below a top-level task` : ''
+          }. Click to open it.`}
+          aria-label={`Sub-task of ${task.parent.key} ${task.parent.title}. Open the parent task`}
           onClick={(e) => {
             e.stopPropagation();
             onOpen(task.parent!.id);
           }}
           onKeyDown={(e) => e.stopPropagation()}
         >
-          ↳ <span className="key">{task.parent.key}</span> {task.parent.title}
+          <span className="parent-label">↳ Sub-task of</span> <span className="key">{task.parent.key}</span> {task.parent.title}
         </button>
       )}
       <div className="title">{task.title}</div>

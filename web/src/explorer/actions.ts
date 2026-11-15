@@ -54,6 +54,8 @@ export interface ActionContext {
   /** A row: whether it is selected. */
   selected: boolean;
   hasTemplates: boolean;
+  /** How many levels deep sub-tasks can go (unknown until the project's settings have loaded). */
+  maxSubtaskDepth?: number;
 }
 
 export const ICONS: Record<Kind, string> = { folder: '📁', epoch: '◆', task: '▫', file: '📄' };
@@ -69,6 +71,15 @@ export const SHORTCUTS = {
 };
 /** Whether a key press is the Delete shortcut: Delete, or ⌘⌫ on a Mac (which has no Delete key). */
 export const isDeleteKey = (e: { key: string; metaKey: boolean }) => e.key === 'Delete' || (isMac && e.metaKey && e.key === 'Backspace');
+
+/** How many tasks are above task `id` (0 for a top-level task). */
+function levelOf(tree: Tree, id: number): number {
+  const parentOf = new Map(tree.tasks.map((t) => [t.id, t.parentId]));
+  let level = 0;
+  // At most one step per task, so a loop in the data can't hang this.
+  for (let p = parentOf.get(id) ?? null; p !== null && level < tree.tasks.length; p = parentOf.get(p) ?? null) level++;
+  return level;
+}
 
 /** An item's row key, as in data-row: "folder-12". */
 export const keyOf = (item: Pick<Item, 'kind' | 'id'>) => `${item.kind}-${item.id}`;
@@ -352,8 +363,9 @@ export function explorerActions(target: Target, ctx: ActionContext): Node[] {
       ];
     case 'task': {
       const t = tree.tasks.find((x) => x.id === target.id);
-      // Sub-tasks can't have sub-tasks of their own.
-      const subtask = t && t.parentId === null ? [action('add-subtask', 'Add sub-task…', { icon: ICONS.task })] : [];
+      // A task on the deepest level sub-tasks can go to can't have sub-tasks of its own.
+      const roomBelow = ctx.maxSubtaskDepth === undefined || levelOf(tree, target.id) < ctx.maxSubtaskDepth;
+      const subtask = t && roomBelow ? [action('add-subtask', 'Add sub-task…', { icon: ICONS.task })] : [];
       return [action('open', 'Open'), ...subtask, select, SEP, ...clipboard(false), SEP, ...manage];
     }
     case 'file': {

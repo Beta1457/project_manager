@@ -90,7 +90,90 @@ export function keyOf(db: DB, id: number): string {
   return r ? taskKey(r.key, r.number) : `#${id}`;
 }
 
-function toDto(row: TaskRow, cats: Map<number, CategoryRef>) {
+// ---- Sub-tasks at several levels ------------------------------------------------
+
+/** How deep sub-tasks can go: a top-level task's sub-tasks are level 1, their sub-tasks level 2, and so on. */
+export const MAX_SUBTASK_DEPTH = 5;
+/**
+ * Stops walks along parent links. The API never makes a loop, so this only guards against data changed some
+ * other way (a hand-edited database), which would otherwise hang the server.
+ */
+const WALK_LIMIT = 100;
+
+/** Where a task sits among sub-tasks. */
+interface Nesting {
+  /** The tasks above it, from the top-level task down to its parent ([] for a top-level task). */
+  ancestorIds: number[];
+  /** Its sub-tasks at every level. */
+  all: number;
+}
+
+/** The tasks above task `id`, from the top-level task down to its parent. */
+export function ancestorsOf(db: DB, id: number): number[] {
+  const rows = db
+    .prepare(
+      `WITH RECURSIVE up(id, n) AS (
+         SELECT parent_id, 1 FROM tasks WHERE id = ? AND parent_id IS NOT NULL
+         UNION ALL
+         SELECT t.parent_id, up.n + 1 FROM tasks t JOIN up ON t.id = up.id WHERE t.parent_id IS NOT NULL AND up.n < ${WALK_LIMIT}
+       )
+       SELECT id FROM up ORDER BY n DESC`,
+    )
+    .all(id) as Array<{ id: number }>;
+  return rows.map((r) => r.id);
+}
+
+/** Every task below task `id` (its sub-tasks, theirs, and so on), with how many levels below it each one is. */
+export function descendantsOf(db: DB, id: number): Array<{ id: number; level: number }> {
+  return db
+    .prepare(
+      `WITH RECURSIVE down(id, level) AS (
+         SELECT id, 1 FROM tasks WHERE parent_id = ?
+         UNION ALL
+         SELECT t.id, down.level + 1 FROM tasks t JOIN down ON t.parent_id = down.id WHERE down.level < ${WALK_LIMIT}
+       )
+       SELECT id, level FROM down`,
+    )
+    .all(id) as unknown as Array<{ id: number; level: number }>;
+}
+
+/** Nesting for one task. Lists use nestingIn() instead, which needs one query for the whole project. */
+function nestingOf(db: DB, id: number): Nesting {
+  return { ancestorIds: ancestorsOf(db, id), all: descendantsOf(db, id).length };
+}
+
+/** Nesting for any task of project `projectId`, from one query of the project's parent links. */
+function nestingIn(db: DB, projectId: number): (id: number) => Nesting {
+  const parentOf = new Map<number, number>();
+  const childrenOf = new Map<number, number[]>();
+  const links = db.prepare('SELECT id, parent_id FROM tasks WHERE project_id = ? AND parent_id IS NOT NULL').all(projectId) as unknown as Array<{
+    id: number;
+    parent_id: number;
+  }>;
+  for (const r of links) {
+    parentOf.set(r.id, r.parent_id);
+    const siblings = childrenOf.get(r.parent_id);
+    if (siblings) siblings.push(r.id);
+    else childrenOf.set(r.parent_id, [r.id]);
+  }
+  const counts = new Map<number, number>();
+  const count = (id: number, depth: number): number => {
+    let n = counts.get(id);
+    if (n === undefined) {
+      n = 0;
+      if (depth < WALK_LIMIT) for (const c of childrenOf.get(id) ?? []) n += 1 + count(c, depth + 1);
+      counts.set(id, n);
+    }
+    return n;
+  };
+  return (id) => {
+    const ancestorIds: number[] = [];
+    for (let p = parentOf.get(id); p !== undefined && ancestorIds.length < WALK_LIMIT; p = parentOf.get(p)) ancestorIds.unshift(p);
+    return { ancestorIds, all: count(id, 0) };
+  };
+}
+
+function toDto(row: TaskRow, cats: Map<number, CategoryRef>, nesting: Nesting) {
   const categories = (row.category_ids ? row.category_ids.split(',').map(Number) : [])
     .map((id) => cats.get(id))
     .filter((c): c is CategoryRef => !!c)
@@ -122,8 +205,13 @@ function toDto(row: TaskRow, cats: Map<number, CategoryRef>) {
       row.parent_id !== null && row.parent_number !== null
         ? { id: row.parent_id, key: taskKey(row.project_key, row.parent_number), title: row.parent_title ?? '' }
         : null,
-    /** This task's sub-tasks; "done" counts those at Alpha Complete or later (the rule blockers use). */
-    subtasks: { done: row.subtask_done, total: row.subtask_total },
+    /** The tasks above this one, from the top-level task down to its parent ([] for a top-level task). */
+    ancestorIds: nesting.ancestorIds,
+    /**
+     * This task's own sub-tasks ("total"), how many of those are done (at Alpha Complete or later, the rule
+     * blockers use), and its sub-tasks at every level ("all": theirs too, and so on).
+     */
+    subtasks: { done: row.subtask_done, total: row.subtask_total, all: nesting.all },
     categories,
     sortOrder: row.sort_order,
     createdBy: row.created_by,
@@ -137,18 +225,31 @@ export type TaskDto = ReturnType<typeof toDto>;
 export function getTask(db: DB, id: number): TaskDto {
   const row = db.prepare(`${TASK_SELECT} WHERE t.id = ?`).get(id) as TaskRow | undefined;
   if (!row) throw notFound(`Task ${id}`);
-  return toDto(row, categoryMap(db, row.project_id));
+  return toDto(row, categoryMap(db, row.project_id), nestingOf(db, id));
 }
 
-/** A task's sub-tasks in the order they were created, without descriptions. */
+/** A task's own sub-tasks in the order they were created, without descriptions. */
 function getChildren(db: DB, id: number, projectId: number): TaskDto[] {
   const rows = db.prepare(`${TASK_SELECT} WHERE t.parent_id = ? ORDER BY t.number`).all(id) as unknown as TaskRow[];
   const cats = categoryMap(db, projectId);
+  const nesting = nestingIn(db, projectId);
   return rows.map((r) => {
-    const dto = toDto(r, cats);
+    const dto = toDto(r, cats, nesting(r.id));
     (dto as { description?: string }).description = undefined;
     return dto;
   });
+}
+
+/** These tasks (a task's ancestorIds) with their keys and titles, in the order given. */
+function getAncestors(db: DB, ids: number[]): Array<{ id: number; key: string; title: string }> {
+  if (!ids.length) return [];
+  const rows = db
+    .prepare(
+      `SELECT t.id, t.number, t.title, p.key FROM tasks t JOIN projects p ON p.id = t.project_id WHERE t.id IN (${ids.map(() => '?').join(',')})`,
+    )
+    .all(...ids) as Array<{ id: number; number: number; title: string; key: string }>;
+  const byId = new Map(rows.map((r) => [r.id, { id: r.id, key: taskKey(r.key, r.number), title: r.title }]));
+  return ids.flatMap((a) => byId.get(a) ?? []);
 }
 
 function getTaskDetail(db: DB, id: number) {
@@ -160,7 +261,14 @@ function getTaskDetail(db: DB, id: number) {
   const activity = db
     .prepare('SELECT id, actor, kind, message, created_at AS createdAt FROM activity WHERE task_id = ? ORDER BY id DESC LIMIT 200')
     .all(id);
-  return { ...task, checklistItems: checklist, links: getLinks(db, id), children: getChildren(db, id, task.projectId), activity };
+  return {
+    ...task,
+    checklistItems: checklist,
+    links: getLinks(db, id),
+    ancestors: getAncestors(db, task.ancestorIds),
+    children: getChildren(db, id, task.projectId),
+    activity,
+  };
 }
 
 // ---- Task links ---------------------------------------------------------------
@@ -365,23 +473,35 @@ function changeStatus(db: DB, projectId: number, id: number, actor: string, stat
   touch(db, id);
 }
 
+const levels = (n: number) => `${n} level${n === 1 ? '' : 's'}`;
+
 /**
  * Checks that task `parentId` can take task `childId` (null for a task being created) as a sub-task: same
- * project, not itself, and one level only. Returns the parent's key for activity messages.
+ * project, not the task itself or one of its own sub-tasks (that would make a loop), and with the child's own
+ * sub-tasks no more than MAX_SUBTASK_DEPTH levels deep. Returns the parent's key for activity messages.
  */
 function checkParent(db: DB, projectId: number, childId: number | null, parentId: number): string {
-  const p = db.prepare('SELECT project_id, parent_id FROM tasks WHERE id = ?').get(parentId) as
-    | { project_id: number; parent_id: number | null }
-    | undefined;
+  const p = db.prepare('SELECT project_id FROM tasks WHERE id = ?').get(parentId) as { project_id: number } | undefined;
   if (!p) throw notFound(`Task ${parentId}`);
   if (p.project_id !== projectId) throw badRequest('A sub-task must be in the same project as its parent');
   if (childId === parentId) throw badRequest('A task cannot be its own parent');
   const key = keyOf(db, parentId);
-  if (p.parent_id !== null) {
-    throw badRequest(`${key} is a sub-task of ${keyOf(db, p.parent_id)}. Sub-tasks can't have sub-tasks of their own.`);
+  const above = ancestorsOf(db, parentId);
+  if (childId !== null && above.includes(childId)) {
+    const child = keyOf(db, childId);
+    throw badRequest(`${key} is a sub-task of ${child} (or further down), so it can't be ${child}'s parent`);
   }
-  if (childId !== null && db.prepare('SELECT 1 FROM tasks WHERE parent_id = ?').get(childId)) {
-    throw badRequest(`${keyOf(db, childId)} has sub-tasks of its own, so it can't become a sub-task`);
+  if (above.length >= MAX_SUBTASK_DEPTH) {
+    throw badRequest(`${key} is already ${levels(above.length)} deep, so it can't have sub-tasks (the limit is ${levels(MAX_SUBTASK_DEPTH)})`);
+  }
+  if (childId !== null) {
+    // The child's own sub-tasks move down with it.
+    const below = descendantsOf(db, childId).reduce((deepest, d) => Math.max(deepest, d.level), 0);
+    if (above.length + 1 + below > MAX_SUBTASK_DEPTH) {
+      throw badRequest(
+        `${keyOf(db, childId)} has sub-tasks ${levels(below)} deep, so under ${key} they would go past the limit of ${levels(MAX_SUBTASK_DEPTH)}`,
+      );
+    }
   }
   return key;
 }
@@ -588,15 +708,17 @@ export function updateTask({ db, access }: TaskDeps, pid: number, id: number, ac
 }
 
 /**
- * Deletes tasks, and their sub-tasks too when asked. Sub-tasks that stay become top-level tasks. Tasks that
- * stay get a note when a task they were linked to, their parent or a sub-task is deleted. Returns the deleted
- * ids and the ids of tasks that stay but changed.
+ * Deletes tasks, and their sub-tasks at every level too when asked. Sub-tasks that stay move up to the nearest
+ * task above them that stays (the way a deleted folder's contents move up), or become top-level tasks. Tasks
+ * that stay get a note when a task they were linked to, their parent or a sub-task is deleted. Returns the
+ * deleted ids and the ids of tasks that stay but changed.
  */
 export function deleteTasks(db: DB, ids: number[], actor: string, opts: { withSubtasks?: boolean } = {}): { deleted: number[]; touched: number[] } {
   return tx(db, () => {
     const doomed = new Set(ids);
-    const childrenOf = db.prepare('SELECT id FROM tasks WHERE parent_id = ? ORDER BY number');
-    if (opts.withSubtasks) for (const id of ids) for (const r of childrenOf.all(id)) doomed.add(r.id as number);
+    if (opts.withSubtasks) for (const id of ids) for (const d of descendantsOf(db, id)) doomed.add(d.id);
+    const childrenOf = db.prepare('SELECT id, title FROM tasks WHERE parent_id = ? ORDER BY number');
+    const reparent = db.prepare('UPDATE tasks SET parent_id = ? WHERE id = ?');
     const info = db.prepare('SELECT title, parent_id FROM tasks WHERE id = ?');
     const linked = db.prepare(
       'SELECT CASE WHEN source_id = ? THEN target_id ELSE source_id END AS other FROM task_links WHERE source_id = ? OR target_id = ?',
@@ -615,13 +737,21 @@ export function deleteTasks(db: DB, ids: number[], actor: string, opts: { withSu
         logActivity(db, t.parent_id, actor, 'subtask', `Removed sub-task: ${what} was deleted`);
         touched.add(t.parent_id);
       }
-      // Sub-tasks that stay lose their parent (ON DELETE SET NULL).
-      for (const r of childrenOf.all(id)) {
-        const child = r.id as number;
-        if (doomed.has(child)) continue;
-        logActivity(db, child, actor, 'subtask', `Parent ${what} was deleted, so this is now a top-level task`);
-        touch(db, child);
-        touched.add(child);
+      // Sub-tasks that stay move up to the nearest task above this one that stays, or to the top level.
+      const kept = (childrenOf.all(id) as Array<{ id: number; title: string }>).filter((c) => !doomed.has(c.id));
+      if (!kept.length) continue;
+      const heir = ancestorsOf(db, id).reverse().find((a) => !doomed.has(a)) ?? null;
+      const heirKey = heir === null ? null : keyOf(db, heir);
+      for (const child of kept) {
+        reparent.run(heir, child.id);
+        logActivity(db, child.id, actor, 'subtask', `Parent ${what} was deleted, so this is now ${heirKey ? `a sub-task of ${heirKey}` : 'a top-level task'}`);
+        touch(db, child.id);
+        touched.add(child.id);
+        if (heir !== null) {
+          logActivity(db, heir, actor, 'subtask', `Sub-task ${keyOf(db, child.id)} "${child.title}" moved here: its parent ${what} was deleted`);
+          touch(db, heir);
+          touched.add(heir);
+        }
       }
     }
     const del = db.prepare('DELETE FROM tasks WHERE id = ?');
@@ -677,8 +807,14 @@ export function createFromTemplate(
     const title = hasSlot ? pattern.replace(TITLE_SLOT, () => givenTitle) : givenTitle || pattern;
     const slot = givenTitle || title;
     const fill = (s: string) => s.replace(TITLE_SLOT, () => slot);
+    // Its sub-tasks go a level below it: check they fit before anything is made.
     if (given.parentId && t.subtasks.length) {
-      throw badRequest(`The template "${tpl.name}" has sub-tasks, so a task made from it can't be a sub-task itself`);
+      const key = checkParent(db, pid, null, given.parentId);
+      if (ancestorsOf(db, given.parentId).length + 2 > MAX_SUBTASK_DEPTH) {
+        throw badRequest(
+          `The template "${tpl.name}" has sub-tasks, so a task made from it under ${key} would go past the limit of ${levels(MAX_SUBTASK_DEPTH)}`,
+        );
+      }
     }
 
     const typeOf = (name: string | null, what: string): string | undefined => {
@@ -800,7 +936,7 @@ interface BulkBody {
   /** categories: names or ids to add to and remove from every task. */
   add?: Array<string | number>;
   remove?: Array<string | number>;
-  /** delete: their sub-tasks too (else those become top-level tasks). */
+  /** delete: their sub-tasks too, at every level (else those move up to the nearest task that stays). */
   withSubtasks?: boolean;
 }
 
@@ -829,7 +965,7 @@ interface ListQuery {
   epoch?: string;
   folder?: string;
   createdBy?: string;
-  /** A task key or id: its sub-tasks. "none": top-level tasks only. "any": sub-tasks only. */
+  /** A task key or id: its own sub-tasks (one level down). "none": top-level tasks only. "any": sub-tasks only. */
   parent?: string;
   limit?: number;
   /** "1" leaves out descriptions (the board and list never show them; saves re-downloading every task's markdown). */
@@ -853,13 +989,13 @@ export function registerTaskRoutes(app: FastifyInstance, ctx: AppContext): void 
     if (ref === null || /^(none)?$/i.test(String(ref).trim())) return { ...input, parentId: null };
     return { ...input, parentId: access.task(req, ref).id };
   };
-  /** Also tells the parents of these tasks: their sub-task counts are part of what they show. */
+  /** Also tells every task above these ones, before and after: sub-task counts are part of what they show. */
   const changedWithParents = (ids: number[], actor: string, before: Array<number | null> = []) => {
     const all = new Set<number>(ids);
-    for (const p of before) if (p) all.add(p);
-    for (const id of ids) {
-      const row = db.prepare('SELECT parent_id FROM tasks WHERE id = ?').get(id) as { parent_id: number | null } | undefined;
-      if (row?.parent_id) all.add(row.parent_id);
+    for (const id of [...ids, ...before]) {
+      if (!id) continue;
+      all.add(id);
+      for (const a of ancestorsOf(db, id)) all.add(a);
     }
     for (const id of all) changed(id, actor);
   };
@@ -930,7 +1066,8 @@ export function registerTaskRoutes(app: FastifyInstance, ctx: AppContext): void 
     const sql = `${prefix}${TASK_SELECT} WHERE ${where.join(' AND ')} ORDER BY t.sort_order, t.id LIMIT ${limit}`;
     const rows = db.prepare(sql).all(...params) as unknown as TaskRow[];
     const map = categoryMap(db, project.id);
-    const tasks = rows.map((r) => toDto(r, map));
+    const nesting = nestingIn(db, project.id);
+    const tasks = rows.map((r) => toDto(r, map, nesting(r.id)));
     if (q.summary === '1') for (const t of tasks) (t as { description?: string }).description = undefined;
     return { tasks };
   });
@@ -1051,7 +1188,7 @@ export function registerTaskRoutes(app: FastifyInstance, ctx: AppContext): void 
     },
   );
 
-  // Sub-tasks stay (as top-level tasks) unless ?withSubtasks=true.
+  // Sub-tasks stay (moving up a level) unless ?withSubtasks=true, which deletes them at every level.
   app.delete<{ Params: { id: string }; Querystring: { withSubtasks?: string } }>('/api/v1/tasks/:id', async (req) => {
     const { actor } = requireAuth(req);
     const { id } = access.task(req, req.params.id);

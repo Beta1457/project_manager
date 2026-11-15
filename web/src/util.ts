@@ -74,6 +74,39 @@ export function plural(n: number, word: string, pluralWord = `${word}s`): string
   return `${n} ${n === 1 ? word : pluralWord}`;
 }
 
+/** Ids of every task below these ones: their sub-tasks, the sub-tasks of those, and so on. */
+export function tasksBelow(tasks: ReadonlyArray<{ id: number; parentId: number | null }>, ids: Iterable<number>): Set<number> {
+  const children = new Map<number, number[]>();
+  for (const t of tasks) {
+    if (t.parentId === null) continue;
+    const list = children.get(t.parentId);
+    if (list) list.push(t.id);
+    else children.set(t.parentId, [t.id]);
+  }
+  const found = new Set<number>();
+  const queue = [...ids];
+  while (queue.length) {
+    for (const c of children.get(queue.pop()!) ?? []) {
+      if (found.has(c)) continue;
+      found.add(c);
+      queue.push(c);
+    }
+  }
+  return found;
+}
+
+/**
+ * What the question before deleting one task says about its sub-tasks (`direct` of its own, `all` at every
+ * level): where they go if they stay, and the box that deletes them too.
+ */
+export function subtaskDeleteWords(direct: number, all: number, parentKey: string | null): { stay: string; checkbox: string } {
+  const deeper = all - direct;
+  return {
+    stay: `Its ${plural(direct, 'sub-task')} ${parentKey ? `will move up to ${parentKey}` : 'will stay, as top-level tasks,'} unless you tick the box.`,
+    checkbox: `Also delete its ${plural(direct, 'sub-task')}${deeper > 0 ? ` and the ${deeper} below ${direct === 1 ? 'it' : 'them'}` : ''}`,
+  };
+}
+
 /** "a", "a and b", "a, b and c". */
 export function joinAnd(items: string[]): string {
   return items.length <= 1 ? (items[0] ?? '') : `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;

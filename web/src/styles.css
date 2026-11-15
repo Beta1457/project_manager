@@ -267,14 +267,17 @@ html.resizing, html.resizing * { cursor: col-resize !important; user-select: non
   padding: 1px 8px; border-radius: 4px; font-size: 0.72rem; font-weight: 700; line-height: 1.5;
 }
 .task-card .meta { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; font-size: 0.75rem; color: var(--muted); }
-/* A sub-task names its parent; clicking the name opens the parent. */
+/* A sub-task says so in colour (like the Blocked flag) and names its parent; clicking it opens the parent. */
 .task-card .parent-chip {
   justify-self: start; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  padding: 1px 6px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-2);
-  color: var(--muted); font: inherit; font-size: 0.75rem; line-height: 1.5; text-align: left; cursor: pointer;
+  padding: 1px 6px; border: 1px solid color-mix(in srgb, var(--primary) 40%, transparent); border-radius: 4px;
+  background: var(--primary-soft); color: var(--text); font: inherit; font-size: 0.75rem; line-height: 1.5; text-align: left; cursor: pointer;
 }
-.task-card .parent-chip:hover, .task-card .parent-chip:focus-visible { color: var(--text); border-color: var(--primary); }
+.task-card .parent-chip:hover, .task-card .parent-chip:focus-visible { border-color: var(--primary); }
+.task-card .parent-chip .parent-label { color: var(--primary); font-weight: 700; }
 .task-card .parent-chip .key { font-size: inherit; }
+/* The same mark in the list's table. */
+.sub-mark { color: var(--primary); font-weight: 700; white-space: nowrap; }
 .task-card .subtask-count { font-weight: 600; white-space: nowrap; }
 .task-card .actions { display: flex; gap: 6px; }
 .drag-overlay { transform: rotate(2deg); box-shadow: var(--shadow-lg); cursor: grabbing; }
@@ -321,6 +324,7 @@ html.resizing, html.resizing * { cursor: col-resize !important; user-select: non
   padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text); cursor: pointer; font: inherit;
 }
 .link-result:hover, .link-result:focus-visible { background: var(--surface-2); }
+.link-result-note { flex: none; white-space: nowrap; }
 .blocked-note { margin: 4px 0 6px; padding: 6px 10px; border-radius: 8px; color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, transparent); font-weight: 600; }
 .blocked-chip { color: var(--danger); font-weight: 700; white-space: nowrap; }
 /* Sub-tasks and the parent row in the task panel */
@@ -328,6 +332,7 @@ html.resizing, html.resizing * { cursor: col-resize !important; user-select: non
 .parent-row a { color: var(--text); min-width: 0; }
 .parent-row a:hover { text-decoration: underline; }
 .subtask-row .subtask-epoch { flex: 0 1 auto; max-width: 30%; }
+.subtask-row .subtask-count { flex: none; white-space: nowrap; }
 /* The status dropdown is a pill in the status's colour (set inline), like the links' status pills. */
 .subtask-row .subtask-status { flex: 0 0 auto; width: auto; min-height: 30px; padding: 2px 8px; font-size: 0.8rem; font-weight: 600; border-radius: 999px; }
 .subtask-row .subtask-status:focus { outline-offset: 2px; } /* outside the pill, which may be the same colour */

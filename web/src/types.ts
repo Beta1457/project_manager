@@ -31,6 +31,8 @@ export interface Meta {
   types: string[];
   typeColors: Record<string, string>;
   categories: Category[];
+  /** How many levels deep sub-tasks can go (a top-level task's sub-tasks are level 1). */
+  maxSubtaskDepth: number;
 }
 
 export interface Task {
@@ -58,8 +60,10 @@ export interface Task {
   /** The task this one is a sub-task of (same project), or null. */
   parentId: number | null;
   parent: { id: number; key: string; title: string } | null;
-  /** Its sub-tasks; `done` counts those at Alpha Complete or later. */
-  subtasks: { done: number; total: number };
+  /** The tasks above this one, from the top-level task down to its parent ([] for a top-level task). */
+  ancestorIds: number[];
+  /** Its own sub-tasks (`done`: at Alpha Complete or later) and its sub-tasks at every level (`all`). */
+  subtasks: { done: number; total: number; all: number };
   categories: Category[];
   sortOrder: number;
   createdBy: string;
@@ -93,7 +97,9 @@ export interface TaskLink {
 export interface TaskDetail extends Task {
   checklistItems: ChecklistItem[];
   links: TaskLink[];
-  /** Its sub-tasks, oldest first (without descriptions). */
+  /** The tasks above it (see ancestorIds), with their keys and titles. */
+  ancestors: Array<{ id: number; key: string; title: string }>;
+  /** Its own sub-tasks, oldest first (without descriptions). */
   children: Task[];
   activity: Activity[];
 }

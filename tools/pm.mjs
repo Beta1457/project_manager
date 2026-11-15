@@ -233,9 +233,14 @@ function printTask(t, detail = false) {
   console.log(`${t.key}  [${t.statusLabel}]  ${t.title}${t.openBlockers ? `  BLOCKED by ${t.openBlockers} open task${t.openBlockers > 1 ? 's' : ''}` : ''}`);
   console.log(`  type=${t.type} priority=${t.priority}${t.epochName ? ` epoch="${t.epochName}"` : ''}${cats ? ` categories=${cats}` : ''}` +
     ` time=${fmtMin(t.loggedMinutes)}${t.estimateMinutes ? `/${fmtMin(t.estimateMinutes)}` : ''}` +
-    `${t.parent ? ` parent=${t.parent.key}` : ''}${t.subtasks?.total ? ` subtasks=${t.subtasks.done}/${t.subtasks.total} done` : ''}`);
+    `${t.parent ? ` parent=${t.parent.key}` : ''}${t.subtasks?.total ? ` subtasks=${t.subtasks.done}/${t.subtasks.total} done` : ''}` +
+    `${t.subtasks?.all > t.subtasks?.total ? ` (${t.subtasks.all} at all levels)` : ''}`);
   if (!detail) return;
-  if (t.parent) console.log(`  sub-task of ${t.parent.key} "${t.parent.title}"`);
+  if (t.parent) {
+    // Sub-tasks can have sub-tasks: name the tasks above the parent too, from the top-level one down.
+    const above = (t.ancestors ?? []).slice(0, -1).map((a) => a.key);
+    console.log(`  sub-task of ${t.parent.key} "${t.parent.title}"${above.length ? ` (under ${above.join(' > ')})` : ''}`);
+  }
   if (t.description) console.log(`\n${t.description}\n`);
   if (t.children?.length) {
     console.log('Sub-tasks:');
@@ -255,9 +260,10 @@ function printTask(t, detail = false) {
   }
 }
 
-/** One line per sub-task: key, status, title and where it lives when that is an epoch. */
+/** One line per sub-task: key, status, title, where it lives when that is an epoch, and its own sub-tasks. */
 function printSubtask(c) {
-  console.log(`  ${c.key} [${c.statusLabel}] ${c.title}${c.epochName ? `  (epoch "${c.epochName}")` : ''}`);
+  const own = c.subtasks?.total ? `  + ${plural(c.subtasks.total, 'sub-task', 'sub-tasks')} of its own` : '';
+  console.log(`  ${c.key} [${c.statusLabel}] ${c.title}${c.epochName ? `  (epoch "${c.epochName}")` : ''}${own}`);
 }
 
 /** Something a user would type as a task: APP-12, app-12, 12 or #12. */
@@ -442,12 +448,14 @@ const commands = {
       case 'delete':
       case 'rm': {
         const key = await taskRef(rest[0]);
-        const { subtasks } = await get(`/api/v1/tasks/${key}`);
+        const { subtasks, parent } = await get(`/api/v1/tasks/${key}`);
         const withSubtasks = !!flags['with-subtasks'];
         const r = await del(`/api/v1/tasks/${key}${withSubtasks ? '?withSubtasks=true' : ''}`);
         if (withSubtasks && r.deleted > 1) return console.log(`Deleted ${key} and its ${plural(r.deleted - 1, 'sub-task', 'sub-tasks')}`);
         if (subtasks.total && !withSubtasks) {
-          return console.log(`Deleted ${key}. Its ${plural(subtasks.total, 'sub-task is', 'sub-tasks are')} now top-level (--with-subtasks deletes them too).`);
+          // They move up a level: under the deleted task's parent, or to the top level.
+          const where = parent ? `now sub-tasks of ${parent.key}` : 'now top-level';
+          return console.log(`Deleted ${key}. Its ${plural(subtasks.total, 'sub-task is', 'sub-tasks are')} ${where} (--with-subtasks deletes them too).`);
         }
         return console.log(`Deleted ${key}`);
       }
@@ -1178,9 +1186,10 @@ Projects: pm project list | current | create --key APP --name "My app" [--color 
 
 Tasks (keys look like APP-12; a bare 12 means task 12 of the current project):
   pm task list [--status S] [--category C] [--type T] [--priority P] [--epoch E|none] [--folder F|inbox] [--created-by NAME] [--q text]
-               [--parent APP-3|none|any]           a task's sub-tasks | top-level tasks only | sub-tasks only
+               [--parent APP-3|none|any]           a task's own sub-tasks | top-level tasks only | sub-tasks only
   pm task get APP-12
-  pm task subtasks APP-3                          its sub-tasks and how many are done
+  pm task subtasks APP-3                          its own sub-tasks and how many are done (sub-tasks can have
+                                                  sub-tasks too, up to 5 levels deep)
   pm task create --title "..." [--type Feature] [--category UI,Backend] [--epoch "Version 1.0"]
                  [--priority high] [--status open] [--desc "..." | --desc-file notes.md] [--estimate 2h]
                  [--check "step one" --check "step two"] [--folder F] [--parent APP-3]
@@ -1195,7 +1204,8 @@ Tasks (keys look like APP-12; a bare 12 means task 12 of the current project):
   pm item 34 [--undo] [--text ".."] [--remove]    tick / untick / reword / remove a checklist item (ids shown by task get)
   pm task link APP-12 [blocks | blocked by | duplicates | duplicated by | relates to] APP-9   (default: relates to)
   pm task unlink APP-12 APP-9                     one link per pair of tasks; links show in task get
-  pm task delete APP-12 [--with-subtasks]         without the flag its sub-tasks stay, as top-level tasks
+  pm task delete APP-12 [--with-subtasks]         without the flag its sub-tasks stay, moving up a level;
+                                                  with it they go too, at every level
   pm task create --template Card --title "Fireball"   a task, and its sub-tasks, from a template; other flags
                                                   replace the template's values ({title} becomes the title)
 

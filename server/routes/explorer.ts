@@ -110,14 +110,20 @@ export function outermost(db: DB, pid: number, items: Located[], opts: { subtask
   /** Whether a task living here goes along with one of the items. */
   const taskCovered = (epochId: number | null, folderId: number | null) =>
     epochId !== null ? epochs.has(epochId) || inFolders(folderOfEpoch.get(epochId) ?? null) : inFolders(folderId);
-  const placeOfTask = db.prepare('SELECT epoch_id, folder_id FROM tasks WHERE id = ?');
+  const taskRow = db.prepare('SELECT parent_id, epoch_id, folder_id FROM tasks WHERE id = ?');
   return items.filter((i) => {
     if (i.kind !== 'task') return !inFolders(i.folderId);
     if (taskCovered(i.epochId, i.folderId)) return false;
-    if (!opts.subtasks || i.parentId === null) return true;
-    if (tasks.has(i.parentId)) return false;
-    const parent = placeOfTask.get(i.parentId) as { epoch_id: number | null; folder_id: number | null } | undefined;
-    return !parent || !taskCovered(parent.epoch_id, parent.epoch_id === null ? parent.folder_id : null);
+    if (!opts.subtasks) return true;
+    // Sub-tasks go along at every level, so a task goes along with any task above it that goes.
+    for (let p = i.parentId, steps = 0; p !== null && steps < 100; steps++) {
+      if (tasks.has(p)) return false;
+      const up = taskRow.get(p) as { parent_id: number | null; epoch_id: number | null; folder_id: number | null } | undefined;
+      if (!up) break;
+      if (taskCovered(up.epoch_id, up.epoch_id === null ? up.folder_id : null)) return false;
+      p = up.parent_id;
+    }
+    return true;
   });
 }
 

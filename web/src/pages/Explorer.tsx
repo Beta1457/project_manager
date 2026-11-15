@@ -13,10 +13,10 @@ import {
   type DragStartEvent,
 } from '@dnd-kit/core';
 import { api, V1 } from '../api';
-import { useColors, useEpochs, useTemplates, useTree } from '../hooks';
+import { useColors, useEpochs, useMeta, useTemplates, useTree } from '../hooks';
 import { useMutate } from '../mutate';
 import type { FileItem, Tree } from '../types';
-import { cx, errorMessage, formatBytes, formatMinutes, joinAnd, plural } from '../util';
+import { cx, errorMessage, formatBytes, formatMinutes, joinAnd, plural, subtaskDeleteWords, tasksBelow } from '../util';
 import { Markdown, Spinner } from '../components/Bits';
 import { MarkdownEditor } from '../components/MarkdownEditor';
 import { folderPath } from '../components/Filters';
@@ -173,6 +173,7 @@ export function ExplorerPage() {
   const { project } = useProject();
   const templates = useTemplates().data ?? [];
   const epochs = useEpochs().data;
+  const maxSubtaskDepth = useMeta().data?.maxSubtaskDepth;
   const colors = useColors();
   const mutate = useMutate();
   const toast = useToast();
@@ -424,15 +425,30 @@ export function ExplorerPage() {
       url += '?deleteTime=true'; // the question says so; without it the server refuses when such time exists
     } else if (i.kind === 'task') {
       const t = tree.tasks.find((x) => x.id === i.id);
+      const direct = tree.tasks.filter((x) => x.parentId === i.id).length;
+      // Sub-tasks that stay move up a level, keeping their own sub-tasks; the box deletes every level.
+      const words = direct
+        ? subtaskDeleteWords(direct, tasksBelow(tree.tasks, [i.id]).size, tree.tasks.find((x) => x.id === t?.parentId)?.key ?? null)
+        : null;
       question = {
         title: `Delete ${t?.key ?? 'task'}?`,
-        body: `"${i.name}" will be deleted, along with its checklist, comments, links and logged time. This can't be undone.`,
+        body: (
+          <>
+            <p>"{i.name}" will be deleted, along with its checklist, comments, links and logged time. This can't be undone.</p>
+            {words && <p>{words.stay}</p>}
+          </>
+        ),
         confirmLabel: 'Delete task',
+        ...(words && { checkbox: words.checkbox }),
       };
     } else {
       question = { title: 'Delete file?', body: `"${i.name}" will be deleted. This can't be undone.`, confirmLabel: 'Delete file' };
     }
-    if (!(await askConfirm(question))) return;
+    if (question.checkbox) {
+      const answer = await askConfirm({ ...question, checkbox: question.checkbox });
+      if (!answer.ok) return;
+      if (answer.checked) url += '?withSubtasks=true';
+    } else if (!(await askConfirm(question))) return;
     const key = keyOf(i);
     const neighbours = neighboursOf(new Set([key]));
     if ((await mutate(() => api.del(`${V1}/${url}`), ALL_KINDS)) !== undefined) refocusAfterRemoval(key, neighbours);
@@ -444,8 +460,9 @@ export function ExplorerPage() {
     const n = items.length;
     const count = (k: Kind) => items.filter((i) => i.kind === k).length;
     const picked = new Set(items.map(keyOf));
-    // Sub-tasks of the tasks picked that aren't picked themselves.
-    const subtasks = tree.tasks.filter((t) => t.parentId !== null && picked.has(`task-${t.parentId}`) && !picked.has(`task-${t.id}`)).length;
+    // Sub-tasks at every level below the tasks picked that aren't picked themselves.
+    const below = tasksBelow(tree.tasks, items.filter((i) => i.kind === 'task').map((i) => i.id));
+    const subtasks = [...below].filter((id) => !picked.has(`task-${id}`)).length;
     // The epochs list knows how much time was logged directly on each epoch; the tree doesn't.
     const picks = items.filter((i) => i.kind === 'epoch').map((i) => epochs?.find((e) => e.id === i.id));
     const direct = picks.every(Boolean) ? picks.reduce((sum, e) => sum + (e?.loggedDirectMinutes ?? 0), 0) : null;
@@ -485,7 +502,7 @@ export function ExplorerPage() {
                 `The ${formatMinutes(direct)} logged directly on the ${epochCount === 1 ? 'epoch is deleted with it' : 'epochs is deleted with them'}.`}
           </p>
         )}
-        {subtasks > 0 && <p>{plural(subtasks, 'sub-task')} of these tasks will stay, as top-level tasks, unless you tick the box.</p>}
+        {subtasks > 0 && <p>{plural(subtasks, 'sub-task')} of these tasks will stay, moving up to take their place, unless you tick the box.</p>}
       </>
     );
     const options: ConfirmOptions = {
@@ -710,6 +727,7 @@ export function ExplorerPage() {
       expanded: (target.kind === 'folder' || target.kind === 'epoch') && expanded.has(keyOf(target)),
       selected: target.kind !== 'root' && target.kind !== 'inbox' && target.kind !== 'selection' && selection.has(keyOf(target)),
       hasTemplates: templates.length > 0,
+      maxSubtaskDepth,
     });
   const isCut = (item: Item) => clip?.mode === 'cut' && clip.items.some((i) => i.kind === item.kind && i.id === item.id);
 

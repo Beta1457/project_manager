@@ -4,6 +4,7 @@ import { requireAuth } from '../auth.ts';
 import { PRIORITIES, STATUSES, normalizeStatus } from '../lib/constants.ts';
 import { conflict, notFound } from '../lib/errors.ts';
 import { assertColor, nonEmpty, parseId } from '../lib/util.ts';
+import { MAX_SUBTASK_DEPTH } from './tasks.ts';
 
 /** Categories, task types and Kanban column colours. Each project has its own. */
 export function registerMetaRoutes(app: FastifyInstance, ctx: AppContext): void {
@@ -33,6 +34,8 @@ export function registerMetaRoutes(app: FastifyInstance, ctx: AppContext): void 
       types: types(p.id),
       typeColors: typeColors(p.id),
       categories: categories(p.id),
+      /** How many levels deep sub-tasks can go (a top-level task's sub-tasks are level 1). */
+      maxSubtaskDepth: MAX_SUBTASK_DEPTH,
     };
   });
 

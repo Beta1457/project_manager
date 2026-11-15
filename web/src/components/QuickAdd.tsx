@@ -37,9 +37,8 @@ export function QuickAdd({ onClose, onCreated, defaults = {} }: Props) {
   const toast = useToast();
   const meta = useMeta().data;
   const epochs = useEpochs().data ?? [];
-  const allTemplates = useTemplates().data ?? [];
-  // A sub-task can't have sub-tasks of its own, so templates that bring some don't fit under a parent.
-  const templates = defaults.parentId ? allTemplates.filter((t) => !t.subtasks.length) : allTemplates;
+  // Templates with sub-tasks work under a parent too; the server says so if they would go too deep.
+  const templates = useTemplates().data ?? [];
   const [templateId, setTemplateId] = useState(defaults.templateId ? String(defaults.templateId) : '');
   const template = templates.find((t) => String(t.id) === templateId) ?? null;
   const [title, setTitle] = useState('');

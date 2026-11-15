@@ -14,7 +14,7 @@ import { isDescendant } from './structure.ts';
 import { createTask, keyOf } from './tasks.ts';
 
 /**
- * Copies folders (with everything in them), epochs (with their tasks), tasks (with their sub-tasks) and files
+ * Copies folders (with everything in them), epochs (with their tasks), tasks (with their sub-tasks at every level) and files
  * into a folder, or tasks into an epoch, or each next to its original. Used by the Explorer's Copy / Paste and
  * Duplicate, for one item or several at once.
  *
@@ -130,10 +130,22 @@ function collect(db: DB, pid: number, items: ItemRef[]): Plan {
     tooMany();
   }
 
-  // Sub-tasks come along with their parents (one level only, so no deeper search).
-  for (const t of [...plan.tasks]) addTasks(tasksIn('parent_id = ?', t.id));
-  // Parents first: a sub-task copied with its parent is created after the parent's copy.
-  plan.tasks.sort((a, b) => Number(a.parent_id !== null && taskIds.has(a.parent_id)) - Number(b.parent_id !== null && taskIds.has(b.parent_id)));
+  // Sub-tasks come along with their parents, at every level: each task added here is searched in turn.
+  for (let i = 0; i < plan.tasks.length; i++) {
+    addTasks(tasksIn('parent_id = ?', plan.tasks[i].id));
+    if (i % 100 === 99) tooMany();
+  }
+  // Parents first: a sub-task copied with its parent is created after the parent's copy, and so on down.
+  // The sort is stable, so tasks on one level keep their order.
+  const byId = new Map(plan.tasks.map((t) => [t.id, t]));
+  const levelInCopy = new Map(
+    plan.tasks.map((t) => {
+      let level = 0;
+      for (let p = t.parent_id; p !== null && byId.has(p) && level <= plan.tasks.length; p = byId.get(p)!.parent_id) level++;
+      return [t.id, level];
+    }),
+  );
+  plan.tasks.sort((a, b) => levelInCopy.get(a.id)! - levelInCopy.get(b.id)!);
   tooMany();
   plan.bytes = plan.files.reduce((sum, f) => sum + f.size, 0);
   if (plan.bytes > COPY_LIMITS.bytes) {

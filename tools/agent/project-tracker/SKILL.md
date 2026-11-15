@@ -82,10 +82,10 @@ pm task subtasks APP-40                  # its sub-tasks and how many are done (
 pm task update APP-44 --parent APP-40    # move an existing task under it; --parent none makes it top-level again
 ```
 
-- One level only, in one project: a sub-task can't have sub-tasks of its own, and a task with sub-tasks can't become one.
-- `pm task get` shows a task's parent and sub-tasks; lists show `parent=APP-40` and `subtasks=1/2 done`. `pm task list --parent APP-40` lists them, `--parent none` hides all sub-tasks.
+- Sub-tasks can have sub-tasks of their own, up to 5 levels deep, all in one project. A task with sub-tasks can move under another task (they move along); a task can't go under one of its own sub-tasks.
+- `pm task get` shows a task's parent (and the tasks above that) and its own sub-tasks; lists show `parent=APP-40` and `subtasks=1/2 done`, plus how many there are at all levels when deeper ones exist. `pm task list --parent APP-40` lists its own sub-tasks, `--parent none` hides all sub-tasks.
 - Before moving a parent to Alpha QA, check `pm task subtasks` and tell the user which sub-tasks aren't done yet.
-- Deleting a parent keeps its sub-tasks (they become top-level tasks) unless you add `--with-subtasks`. Only delete when the user asks.
+- Deleting a task keeps its sub-tasks unless you add `--with-subtasks` (which deletes every level): they move up a level, under its parent or to the top level. Only delete when the user asks.
 
 **Templates.** When the user keeps making the same kind of task (a card, a boss, a bug report), check `pm template list` and use one: `pm task create --template Card --title "Fireball"` makes the task and its sub-tasks, each in its own epoch. `{title}` in the template becomes the title you give; any other flag replaces the template's value. Read the `Note:` lines it prints (a type, category or epoch the project doesn't have was skipped) and tell the user. Save a task as a template with `pm template create --name Card --from-task APP-40 --with-subtasks --title "Card: {title}"`, but only when the user asks for one.
 
