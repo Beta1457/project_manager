@@ -55,7 +55,10 @@ export interface Task {
   loggedMinutes: number;
   timerRunning: boolean;
   checklist: { done: number; total: number };
-  /** Tasks blocking this one that haven't reached Alpha Complete. */
+  /**
+   * Tasks that block this one and that it has caught up with (they are in its column or an earlier one): it
+   * waits for them to move on. A blocker that is Ready to Ship doesn't count.
+   */
   openBlockers: number;
   /** The task this one is a sub-task of (same project), or null. */
   parentId: number | null;
@@ -91,6 +94,11 @@ export interface TaskLink {
   outgoing: boolean;
   /** How the link reads from this task: "blocks", "blocked by", "duplicates", "duplicated by", "relates to". */
   label: string;
+  /**
+   * A "blocks" link that holds the blocked task up right now (it has caught up with its blocker): on "blocked by",
+   * this task waits for the other one; on "blocks", the other task waits for this one.
+   */
+  blocking: boolean;
   task: { id: number; key: string; title: string; status: string; statusLabel: string; type: string };
 }
 

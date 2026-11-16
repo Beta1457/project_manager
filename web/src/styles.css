@@ -316,6 +316,8 @@ html.resizing, html.resizing * { cursor: col-resize !important; user-select: non
 .link-row a { color: var(--text); min-width: 0; }
 .link-row a:hover .key, .link-row a:hover { text-decoration: underline; }
 .link-label { flex: 0 0 auto; min-width: 74px; text-transform: uppercase; letter-spacing: 0.02em; font-weight: 600; }
+/* A "blocks" link holding a task up right now, like the Blocked flag. */
+.link-label.blocking { color: var(--danger); font-weight: 700; }
 .link-add { margin-top: 6px; }
 .link-add .row > input { flex: 1; min-width: 0; }
 .link-results { display: grid; gap: 4px; }

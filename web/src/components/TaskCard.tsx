@@ -108,7 +108,12 @@ export function TaskCard({ task, onOpen, onStep, onMove, className = '', hideEpo
       )}
       <div className="meta">
         {task.openBlockers > 0 && (
-          <span className="blocked-chip" title={`Blocked by ${task.openBlockers} task${task.openBlockers > 1 ? 's' : ''} not yet Alpha Complete`}>
+          <span
+            className="blocked-chip"
+            title={`Blocked: it has caught up with ${
+              task.openBlockers === 1 ? 'a task that blocks it, so it waits for that task' : `${task.openBlockers} tasks that block it, so it waits for them`
+            } to move on first`}
+          >
             ⛔ Blocked
           </span>
         )}

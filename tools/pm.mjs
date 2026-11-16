@@ -230,7 +230,8 @@ async function resolveType(ref) {
 
 function printTask(t, detail = false) {
   const cats = t.categories?.map((c) => c.name).join(', ');
-  console.log(`${t.key}  [${t.statusLabel}]  ${t.title}${t.openBlockers ? `  BLOCKED by ${t.openBlockers} open task${t.openBlockers > 1 ? 's' : ''}` : ''}`);
+  // Blocked: it has caught up with a task that blocks it (same column or further on) and waits for it to move on.
+  console.log(`${t.key}  [${t.statusLabel}]  ${t.title}${t.openBlockers ? `  BLOCKED by ${plural(t.openBlockers, 'task', 'tasks')}` : ''}`);
   console.log(`  type=${t.type} priority=${t.priority}${t.epochName ? ` epoch="${t.epochName}"` : ''}${cats ? ` categories=${cats}` : ''}` +
     ` time=${fmtMin(t.loggedMinutes)}${t.estimateMinutes ? `/${fmtMin(t.estimateMinutes)}` : ''}` +
     `${t.parent ? ` parent=${t.parent.key}` : ''}${t.subtasks?.total ? ` subtasks=${t.subtasks.done}/${t.subtasks.total} done` : ''}` +
@@ -252,7 +253,11 @@ function printTask(t, detail = false) {
   }
   if (t.links?.length) {
     console.log('Links:');
-    for (const l of t.links) console.log(`  ${l.label} ${l.task.key} [${l.task.statusLabel}] ${l.task.title}`);
+    for (const l of t.links) {
+      // A "blocks" link holding a task up right now: this one ("blocked by") or the other one ("blocks").
+      const now = l.blocking ? (l.outgoing ? '  (waiting for this task)' : '  (holding this task up)') : '';
+      console.log(`  ${l.label} ${l.task.key} [${l.task.statusLabel}] ${l.task.title}${now}`);
+    }
   }
   if (t.activity?.length) {
     console.log('Recent activity:');

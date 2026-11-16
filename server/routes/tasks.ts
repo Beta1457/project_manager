@@ -55,20 +55,41 @@ export interface CategoryRef {
 const LOGGED_EXPR = `COALESCE(minutes, MAX(0, CAST(ROUND((julianday('now') - julianday(started_at)) * 1440) AS INTEGER)))`;
 
 /**
- * A blocker stops blocking once it reaches Alpha Complete (implemented and through alpha QA).
- * Status ids are fixed constants, so inlining them in SQL is safe.
+ * A sub-task counts as done once it reaches Alpha Complete (implemented and through alpha QA).
+ * Status ids are fixed constants, so inlining them in SQL is safe (here and in columnSql).
  */
-const UNRESOLVED_STATUSES = STATUSES.slice(0, STATUSES.findIndex((s) => s.id === 'alpha_complete'))
+const NOT_DONE_STATUSES = STATUSES.slice(0, STATUSES.findIndex((s) => s.id === 'alpha_complete'))
   .map((s) => `'${s.id}'`)
   .join(', ');
+
+/** The last column, Ready to Ship: a blocker there holds nothing up. */
+const LAST_STATUS = STATUSES[STATUSES.length - 1].id;
+
+/** Where a status is on the board, from 0 (Open) to the last column; -1 for a status that isn't one. */
+const columnOf = (status: string) => STATUSES.findIndex((s) => s.id === status);
+
+/** columnOf in SQL, for a status column (NULL for a status that isn't one). */
+const columnSql = (col: string) => `CASE ${col} ${STATUSES.map((s, i) => `WHEN '${s.id}' THEN ${i}`).join(' ')} END`;
+
+/**
+ * Whether a task in `status` is held up by a task in `blockerStatus` that blocks it. A task can't get ahead of
+ * the tasks that block it: once it has caught up with one (it is in the same column, or further on) it is
+ * blocked, until that task moves on. A blocker that is Ready to Ship holds nothing up. TASK_SELECT counts the
+ * same thing in SQL (open_blockers), so the two must change together.
+ */
+function heldUpBy(status: string, blockerStatus: string): boolean {
+  const blocker = columnOf(blockerStatus);
+  return blocker >= 0 && blockerStatus !== LAST_STATUS && columnOf(status) >= blocker;
+}
 
 const TASK_SELECT = `
   SELECT t.*, p.key AS project_key, e.name AS epoch_name, e.color AS epoch_color,
     pt.number AS parent_number, pt.title AS parent_title,
     (SELECT COUNT(*) FROM tasks c WHERE c.parent_id = t.id) AS subtask_total,
-    (SELECT COUNT(*) FROM tasks c WHERE c.parent_id = t.id AND c.status NOT IN (${UNRESOLVED_STATUSES})) AS subtask_done,
+    (SELECT COUNT(*) FROM tasks c WHERE c.parent_id = t.id AND c.status NOT IN (${NOT_DONE_STATUSES})) AS subtask_done,
     (SELECT COUNT(*) FROM task_links l JOIN tasks b ON b.id = l.source_id
-      WHERE l.target_id = t.id AND l.kind = 'blocks' AND b.status IN (${UNRESOLVED_STATUSES})) AS open_blockers,
+      WHERE l.target_id = t.id AND l.kind = 'blocks' AND b.status <> '${LAST_STATUS}'
+        AND ${columnSql('t.status')} >= ${columnSql('b.status')}) AS open_blockers,
     (SELECT SUM(${LOGGED_EXPR}) FROM time_entries WHERE task_id = t.id) AS logged_minutes,
     EXISTS (SELECT 1 FROM time_entries WHERE task_id = t.id AND ended_at IS NULL AND minutes IS NULL) AS timer_running,
     (SELECT COUNT(*) FROM checklist_items WHERE task_id = t.id) AS checklist_total,
@@ -197,7 +218,7 @@ function toDto(row: TaskRow, cats: Map<number, CategoryRef>, nesting: Nesting) {
     loggedMinutes: row.logged_minutes ?? 0,
     timerRunning: !!row.timer_running,
     checklist: { done: row.checklist_done, total: row.checklist_total },
-    /** Tasks that block this one and haven't reached Alpha Complete yet. */
+    /** Tasks that block this one and that it has caught up with (see heldUpBy): it waits for them to move on. */
     openBlockers: row.open_blockers,
     /** The task this one is a sub-task of (always in the same project), or null. */
     parentId: row.parent_id,
@@ -208,8 +229,8 @@ function toDto(row: TaskRow, cats: Map<number, CategoryRef>, nesting: Nesting) {
     /** The tasks above this one, from the top-level task down to its parent ([] for a top-level task). */
     ancestorIds: nesting.ancestorIds,
     /**
-     * This task's own sub-tasks ("total"), how many of those are done (at Alpha Complete or later, the rule
-     * blockers use), and its sub-tasks at every level ("all": theirs too, and so on).
+     * This task's own sub-tasks ("total"), how many of those are done (at Alpha Complete or later), and its
+     * sub-tasks at every level ("all": theirs too, and so on).
      */
     subtasks: { done: row.subtask_done, total: row.subtask_total, all: nesting.all },
     categories,
@@ -264,7 +285,7 @@ function getTaskDetail(db: DB, id: number) {
   return {
     ...task,
     checklistItems: checklist,
-    links: getLinks(db, id),
+    links: getLinks(db, id, task.status),
     ancestors: getAncestors(db, task.ancestorIds),
     children: getChildren(db, id, task.projectId),
     activity,
@@ -300,7 +321,8 @@ function parseLinkKind(raw: string | undefined): { kind: LinkKind; reverse: bool
   return found;
 }
 
-function getLinks(db: DB, id: number) {
+/** Task `id`'s links, read from its side; `status` is its own status, to tell which links hold a task up. */
+function getLinks(db: DB, id: number, status: string) {
   const rows = db
     .prepare(
       `SELECT l.id, l.kind, l.source_id AS sourceId, o.id AS otherId, o.number, p.key AS projectKey, o.title, o.status, o.type
@@ -328,6 +350,11 @@ function getLinks(db: DB, id: number) {
       /** True when this task is the subject ("blocks", "duplicates"); always true for "relates". */
       outgoing,
       label: linkLabel(r.kind, outgoing),
+      /**
+       * Whether this "blocks" link holds the blocked task up right now (see heldUpBy): on "blocked by", this
+       * task waits for the other one; on "blocks", the other task waits for this one. Always false otherwise.
+       */
+      blocking: r.kind === 'blocks' && (outgoing ? heldUpBy(r.status, status) : heldUpBy(status, r.status)),
       task: {
         id: r.otherId,
         key: taskKey(r.projectKey, r.number),

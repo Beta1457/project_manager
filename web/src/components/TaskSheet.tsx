@@ -7,7 +7,7 @@ import { useToast } from './Toast';
 import { useMutate } from '../mutate';
 import { useTaskParam } from '../taskParam';
 import type { TaskDetail } from '../types';
-import { clip, contrastText, formatMinutes, joinAnd, plural, subtaskDeleteWords, timeAgo } from '../util';
+import { clip, contrastText, cx, formatMinutes, joinAnd, plural, subtaskDeleteWords, timeAgo } from '../util';
 import { useUndoableDelete } from '../undoableDelete';
 import { Markdown, Spinner, StatusPill } from './Bits';
 import { askConfirm } from './Confirm';
@@ -571,6 +571,8 @@ function LinksSection({ task }: { task: TaskDetail }) {
   const undoable = useUndoableDelete();
   const linkUrl = (otherId: number) => `${V1}/tasks/${task.id}/links/${otherId}`;
   const links = task.links.filter((l) => !undoable.isHidden(linkUrl(l.task.id)));
+  // The tasks holding this one up: it has caught up with them on the board.
+  const holdingUp = links.filter((l) => l.blocking && !l.outgoing);
   const open = useOpenTask();
   const [adding, setAdding] = useState(false);
   const [kind, setKind] = useState('relates');
@@ -586,14 +588,32 @@ function LinksSection({ task }: { task: TaskDetail }) {
         <div className="section-title">Links {links.length > 0 && `(${links.length})`}</div>
         {!adding && <button className="btn btn-sm" onClick={() => setAdding(true)}>+ Link task</button>}
       </div>
-      {task.openBlockers > 0 && (
+      {holdingUp.length > 0 && (
         <div className="blocked-note small">
-          ⛔ Blocked by {task.openBlockers} open task{task.openBlockers > 1 ? 's' : ''} (not yet Alpha Complete)
+          ⛔ Blocked by {joinAnd(holdingUp.map((l) => `${l.task.key} (${l.task.statusLabel})`))}: this task has caught up with{' '}
+          {holdingUp.length === 1 ? `it, so it can move on once ${holdingUp[0].task.key} does` : 'them, so it can move on once they do'}.
         </div>
       )}
       {links.map((l) => (
         <div key={l.id} className="link-row">
-          <span className="link-label tiny muted">{l.label}</span>
+          {/* A "blocks" link holding a task up right now (this one, or on "blocks" the other one) is marked in red. */}
+          <span
+            className={cx('link-label tiny', l.blocking ? 'blocking' : 'muted')}
+            title={
+              !l.blocking
+                ? undefined
+                : l.outgoing
+                  ? `${l.task.key} has caught up with this task, so it waits for this one to move on`
+                  : `Holding this task up: it has caught up with ${l.task.key}, so it waits for ${l.task.key} to move on`
+            }
+          >
+            {l.blocking && (
+              <>
+                <span role="img" aria-label={l.outgoing ? 'Held up by this task:' : 'Holding this task up:'}>⛔</span>{' '}
+              </>
+            )}
+            {l.label}
+          </span>
           <a className="grow ellipsis" href={`?task=${l.task.id}`} onClick={(e) => open(e, l.task.id)}>
             <span className="key">{l.task.key}</span> {l.task.title}
           </a>

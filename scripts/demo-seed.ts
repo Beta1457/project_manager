@@ -236,9 +236,13 @@ const bossParts: Array<[string, string, Json, string, string]> = [
   ['Guardian sprites and animations', 'Art', artPass, 'alpha_complete', 'Art'],
   ['Guardian roar and hit sounds', 'Audio', audioPass, 'open', 'Audio'],
 ];
+const parts: Json[] = [];
 for (const [title, type, epoch, status, category] of bossParts) {
-  await call('POST', '/api/v1/tasks', { title, type, status, epochId: epoch.id, categories: [category], parent: boss.id });
+  parts.push(await call('POST', '/api/v1/tasks', { title, type, status, epochId: epoch.id, categories: [category], parent: boss.id }));
 }
+// The attack patterns build on the enemy AI. Both are in progress, so the patterns show as Blocked until the AI
+// moves on. (Save and load also waits for the AI, but it hasn't caught up with it: it is still Open.)
+await call('POST', `/api/v1/tasks/${parts[0].id}/links`, { task: tasks.enemies.id, kind: 'blocked_by' });
 
 // Templates: a boss fight like the one above (its art and audio in their own epochs), and a bug report.
 await call('POST', '/api/v1/templates', {

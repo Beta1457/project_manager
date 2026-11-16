@@ -7,6 +7,7 @@ A self-hosted project tracker that runs on your own computer or home server. You
 - **Projects**: as many as you like, each with its own task keys (`APP-12`, `WEB-3`), board, epochs, files, diagram, task types and categories. Each account only ever sees its own projects.
 - **Kanban board**: Open → In Progress → Alpha QA → Alpha Complete → Beta In Progress → Beta QA → Beta Complete → Ready to Ship. Drag and drop on desktop; on phones, one column at a time with ◀ / Move to… / ▶ buttons.
 - **Tasks**: title, type, status, priority, categories, markdown description, checklist, estimate, links between tasks (blocks / blocked by / duplicates / relates to) and an activity log of who moved what, Claude included.
+  - **Blockers**: a task can't get ahead of the tasks that block it. It shows as Blocked once it catches up with one (reaches its column), until that task moves on.
   - **Sub-tasks**: full tasks under a parent, each in its own epoch if you like (a card's art and sound in the Art and Audio epochs). Sub-tasks can have sub-tasks of their own, up to 5 levels deep. Board cards mark sub-tasks and name their parent, and the parent shows how many are done.
   - **Templates**: save a task, with its own sub-tasks, as a template, then make new ones from it in one go. `{title}` in a template becomes the new task's name.
   - **Multi-select**: tick several tasks on the board or in the list (or Ctrl/Shift+click; **Select** on phones) to change their status, epoch, priority, type, categories or parent at once, drag them together, or delete them.

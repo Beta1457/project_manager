@@ -814,7 +814,7 @@ test('task links: kinds, both directions, blockers, conflicts, removal and casca
   assert.ok((await get(b)).links.some((l: { label: string; task: { id: number } }) => l.label === 'relates to' && l.task.id === c.id));
   assert.ok((await get(c)).links.some((l: { label: string; task: { id: number } }) => l.label === 'relates to' && l.task.id === b.id));
 
-  // A blocker stops counting once it reaches Alpha Complete.
+  // A blocker that has moved ahead of the task doesn't hold it up (the test after next has the whole rule).
   await call('POST', `/api/v1/tasks/${a.id}/status`, { status: 'Alpha Complete' });
   assert.equal((await listed(b)).openBlockers, 0);
 
@@ -839,9 +839,57 @@ test('a task can have several blockers and other links at once', async () => {
   const detail = (await call('GET', `/api/v1/tasks/${target.id}`)).body;
   assert.deepEqual(detail.links.map((l: Json) => l.label).sort(), ['blocked by', 'blocked by', 'relates to']);
   assert.equal(detail.openBlockers, 2);
-  // Each blocker clears independently.
-  await call('POST', `/api/v1/tasks/${b1.id}/status`, { status: 'Alpha Complete' });
+  // Only "blocks" links hold a task up.
+  assert.deepEqual(detail.links.map((l: Json) => [l.label, l.blocking]).sort(), [['blocked by', true], ['blocked by', true], ['relates to', false]]);
+  // Each blocker counts on its own: one moving ahead leaves the other.
+  await call('POST', `/api/v1/tasks/${b1.id}/status`, { status: 'In Progress' });
   assert.equal((await call('GET', `/api/v1/tasks/${target.id}`)).body.openBlockers, 1);
+  // Catching up with it counts it again; the one still Open counts too, as the task is now past it.
+  await call('POST', `/api/v1/tasks/${target.id}/status`, { status: 'In Progress' });
+  assert.equal((await call('GET', `/api/v1/tasks/${target.id}`)).body.openBlockers, 2);
+});
+
+test('a task is blocked once it catches up with a task that blocks it, until that task moves on', async () => {
+  const mk = async (title: string) => (await call('POST', '/api/v1/tasks', { title })).body;
+  const [a, b] = [await mk('Blocker A'), await mk('Blocked B')];
+  assert.equal((await call('POST', `/api/v1/tasks/${a.id}/links`, { task: b.id, kind: 'blocks' })).status, 201);
+  const move = async (t: Json, status: string) => {
+    const r = await call('POST', `/api/v1/tasks/${t.id}/status`, { status });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+  };
+  /** How many tasks hold B up, after checking that the list, the detail and both sides' links agree. */
+  const heldUp = async () => {
+    const listed = (await call('GET', `/api/v1/tasks?q=${b.key}`)).body.tasks.find((x: Json) => x.id === b.id);
+    const bDetail = (await call('GET', `/api/v1/tasks/${b.id}`)).body;
+    const aDetail = (await call('GET', `/api/v1/tasks/${a.id}`)).body;
+    assert.equal(bDetail.openBlockers, listed.openBlockers);
+    assert.equal(bDetail.links[0].blocking, listed.openBlockers === 1, 'B\'s "blocked by" link');
+    assert.equal(aDetail.links[0].blocking, listed.openBlockers === 1, 'A\'s "blocks" link');
+    assert.equal(aDetail.openBlockers, 0);
+    return listed.openBlockers;
+  };
+
+  // Both Open: B has caught up with A.
+  assert.equal(await heldUp(), 1);
+  // A moves ahead: B isn't held up until it reaches A's column.
+  await move(a, 'Alpha QA');
+  assert.equal(await heldUp(), 0);
+  await move(b, 'In Progress');
+  assert.equal(await heldUp(), 0);
+  await move(b, 'Alpha QA');
+  assert.equal(await heldUp(), 1);
+  // Getting past A doesn't help: it still waits for A.
+  await move(b, 'Beta In Progress');
+  assert.equal(await heldUp(), 1);
+  // The same in every column, not just up to Alpha Complete.
+  await move(a, 'Beta In Progress');
+  assert.equal(await heldUp(), 1);
+  await move(a, 'Beta QA');
+  assert.equal(await heldUp(), 0);
+  // A blocker that is Ready to Ship blocks nothing, even with B there too.
+  await move(a, 'Ready to Ship');
+  await move(b, 'Ready to Ship');
+  assert.equal(await heldUp(), 0);
 });
 
 test('sub-tasks: own epochs, progress, filters, nesting in one project, changing the parent', async () => {
