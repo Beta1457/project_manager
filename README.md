@@ -5,7 +5,7 @@ A self-hosted project tracker that runs on your own computer or home server. You
 ![The board: a column per status, each card showing its epoch, key, type, categories, priority, checklist progress and logged time, and sub-tasks marked with their parent](docs/images/board.png)
 
 - **Projects**: as many as you like, each with its own task keys (`APP-12`, `WEB-3`), board, epochs, files, diagram, task types and categories. Each account only ever sees its own projects.
-- **Kanban board**: Open → In Progress → Alpha QA → Alpha Complete → Beta In Progress → Beta QA → Beta Complete → Ready to Ship. Drag and drop on desktop; on phones, one column at a time with ◀ / Move to… / ▶ buttons.
+- **Kanban board**: Open → In Progress → Alpha QA → Alpha Complete → Beta In Progress → Beta QA → Beta Complete → Ready to Ship. On desktop, drag cards between columns, or up and down a column to change their order. On phones, one column at a time with ◀ / Move to… / ▶ buttons; Move to… also moves a card to the top or bottom of its column, or one place up or down.
 - **Tasks**: title, type, status, priority, categories, markdown description, checklist, estimate, links between tasks (blocks / blocked by / duplicates / relates to) and an activity log of who moved what, Claude included.
   - **Blockers**: a task can't get ahead of the tasks that block it. It shows as Blocked once it catches up with one (reaches its column), until that task moves on.
   - **Sub-tasks**: full tasks under a parent, each in its own epoch if you like (a card's art and sound in the Art and Audio epochs). Sub-tasks can have sub-tasks of their own, up to 5 levels deep. Board cards mark sub-tasks and name their parent, and the parent shows how many are done.
@@ -157,6 +157,7 @@ pm project list   /   pm project use WEB
 pm task create --title "Add CSV export" --type Feature --category Backend --epoch "Version 1.0" --estimate 1h
 pm task advance APP-5 --note "starting"
 pm task status APP-5 "Alpha QA" --note "12 tests pass"
+pm task reorder APP-5 --top                 # its place in its column; also --bottom, --before APP-3, --after APP-3
 pm task link APP-5 blocked by APP-3
 pm time start --task APP-5   /   pm time stop   /   pm time log --task APP-5 --duration 45m
 pm diagram add-node --label AuthService --layer services --parent Backend   /   pm diagram connect AuthService Database

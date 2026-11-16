@@ -26,6 +26,15 @@ node .claude/skills/project-tracker/pm.mjs <command>
 
 **You may move tasks through `Open → In Progress → Alpha QA` on your own.** Everything after Alpha QA is a human QA gate: only move a task to Alpha Complete, Beta *, or Ready to Ship when the user explicitly tells you to (e.g. "alpha QA passed for APP-12", "start beta on the onboarding epoch"). In the beta phase the same pattern repeats: you may move `Beta In Progress → Beta QA` for work you do; the user approves Beta Complete and Ready to Ship.
 
+**Order in a column.** The cards in each column are in the user's order, from the top down. `pm task list --status open` lists a column from the top down, as the board shows it; lists without `--status` go column by column. Change the order only when the user asks ("put APP-12 at the top", "order Open by priority") or agrees to an order you suggested:
+
+```
+pm task reorder APP-12 --top                # or --bottom, --before APP-9, --after APP-9
+pm task reorder APP-3 APP-7 APP-5 --top     # several: together, in the order given
+```
+
+Reordering never changes a task's column (that is `pm task status`), so the tasks you name and the one after `--before` or `--after` must all be in the same column.
+
 ## Workflow for a new request
 
 When the user asks for something new (e.g. "add a settings page with a dark mode toggle"):
@@ -49,12 +58,12 @@ When the user asks for something new (e.g. "add a settings page with a dark mode
 
 The user often captures ideas on their phone. When they say things like "work on APP-12", "look at my new ideas", "what's in the inbox" or "pick up the next open task":
 
-1. Find it: `pm task get APP-12`, or list candidates with `pm task list --status open` / `pm task list --folder inbox` (quick ideas without a folder or epoch) / `pm task list --created-by <username>` / `pm task list --q "<keywords>"`.
+1. Find it: `pm task get APP-12`, or list candidates with `pm task list --status open` / `pm task list --folder inbox` (quick ideas without a folder or epoch) / `pm task list --created-by <username>` / `pm task list --q "<keywords>"`. For "the next open task", take the first task in `pm task list --status open` that isn't BLOCKED: the list is in the user's order, top first.
 2. Read everything: the description, checklist, links and recent activity from `pm task get`. If it says **BLOCKED**, it has caught up with a task that blocks it: a `blocked by` task, marked `(holding this task up)`, is in the same column or an earlier one. Don't move it to the next column until that task has moved on. If it's still Open, tell the user and suggest doing the blocker first, rather than starting it anyway. Images in the description look like `![name](/api/v1/files/<id>/content)`. Download them with `pm file download <id> --out <tmp path>` and look at them, since sketches and screenshots often carry the actual idea. Linked documents can be read with `pm doc read <id>`.
 3. Phone notes are usually short. Before coding, flesh the task out: fill in the description (summary, acceptance criteria, implementation notes), the type, the categories and an estimate with `pm task update`, and tell the user what you understood. If the idea is genuinely ambiguous, ask first.
 4. Then follow "While working" and "Finishing" below.
 
-If the user asks which of their ideas to do next, list them and recommend an order. Don't start several at once.
+If the user asks which of their ideas to do next, list them and recommend an order. Don't start several at once. If they agree to the order, put it on the board with `pm task reorder` (see "Order in a column").
 
 ## While working
 
@@ -191,11 +200,11 @@ pm column list | color "Alpha QA" #a855f7               # Kanban column colours;
 
 ## Anything else
 
-Every API endpoint is documented in `API.md` next to this file. For something the commands above don't cover (e.g. board ordering, deleting a diagram), call it directly; `pm api` sends the token and the project for you:
+Every API endpoint is documented in `API.md` next to this file. For something the commands above don't cover (e.g. deleting a diagram), call it directly; `pm api` sends the token and the project for you:
 
 ```
 pm api GET "/api/v1/tasks?status=alpha_qa&summary=1"
-pm api POST /api/v1/tasks/APP-12/move --body-file <tmp.json>      # body: {"status": "open", "beforeId": 9}
+pm api PATCH /api/v1/<path> --body-file <tmp.json>
 ```
 
 In API paths, use task keys (`APP-12`): a bare number there is the task's internal id, not its number. Prefer `--body-file` over `--body` for JSON (shell quoting on Windows is fragile).

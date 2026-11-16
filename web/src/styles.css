@@ -281,6 +281,9 @@ html.resizing, html.resizing * { cursor: col-resize !important; user-select: non
 .task-card .subtask-count { font-weight: 600; white-space: nowrap; }
 .task-card .actions { display: flex; gap: 6px; }
 .drag-overlay { transform: rotate(2deg); box-shadow: var(--shadow-lg); cursor: grabbing; }
+/* Move to… on phones: Top and Up on one row, Bottom and Down on the next. */
+.order-moves { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.order-moves .btn { min-height: 46px; }
 
 /* ---------- List view ---------- */
 .list-table { width: 100%; border-collapse: collapse; background: var(--surface); }

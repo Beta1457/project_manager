@@ -63,7 +63,7 @@ function authHeaders() {
 // ------------------------------------------------------------------ args ----
 
 const REPEATABLE = new Set(['check']);
-const BOOLEAN = new Set(['json', 'undo', 'help', 'remove', 'delete-time', 'replace', 'yes', 'with-children', 'with-subtasks']);
+const BOOLEAN = new Set(['json', 'undo', 'help', 'remove', 'delete-time', 'replace', 'yes', 'with-children', 'with-subtasks', 'top', 'bottom']);
 
 function parseArgs(argv) {
   const pos = [];
@@ -297,6 +297,18 @@ async function parentRef(raw) {
 /** "1 box", "3 boxes". */
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 
+/** Tasks in the board's order: column by column (Open first), each column from the top down. */
+async function boardOrder(tasks) {
+  // One column: the server already lists it from the top down.
+  if (new Set(tasks.map((t) => t.status)).size < 2) return tasks;
+  const column = new Map((await get('/api/v1/meta')).statuses.map((s, i) => [s.id, i]));
+  const at = (t) => column.get(t.status) ?? column.size;
+  return [...tasks].sort((a, b) => at(a) - at(b) || a.sortOrder - b.sortOrder || a.id - b.id);
+}
+
+const PLACES = ['top', 'bottom', 'before', 'after'];
+const REORDER_USAGE = 'pm task reorder APP-12 [APP-13 ...] --top | --bottom | --before APP-9 | --after APP-9';
+
 const out = (flags, data, human) => (flags.json ? console.log(JSON.stringify(data, null, 2)) : human(data));
 
 /** What a diagram import changes: "add 7 boxes and 8 arrows, update 1 box" ("added …" once done), or "change nothing". */
@@ -346,7 +358,7 @@ const commands = {
           priority: flags.priority, epoch: epoch === null ? 'none' : epoch, folder, createdBy: flags['created-by'],
           parent: parent === null ? 'none' : parent,
         }));
-        return out(flags, r.tasks, (ts) => (ts.length ? ts.forEach((t) => printTask(t)) : console.log('No tasks found.')));
+        return out(flags, await boardOrder(r.tasks), (ts) => (ts.length ? ts.forEach((t) => printTask(t)) : console.log('No tasks found.')));
       }
       case 'get':
       case 'show':
@@ -409,6 +421,7 @@ const commands = {
       }
       case 'status':
       case 'move': {
+        if (PLACES.some((p) => flags[p] !== undefined)) fail(`pm task ${sub} changes a task's column. To change its place in its column: ${REORDER_USAGE}`);
         const { keys, rest: words } = await leadingKeys(rest);
         const status = need(flags.status ?? words.join(' '), 'status');
         if (keys.length === 1) {
@@ -417,6 +430,53 @@ const commands = {
         }
         const r = await post('/api/v1/tasks/bulk', { action: 'update', ids: keys, set: { status, note: flags.note } });
         return out(flags, r.tasks, (ts) => ts.forEach((t) => console.log(`${t.key} → ${t.statusLabel}`)));
+      }
+      case 'reorder':
+      case 'order': {
+        // A task's place in its column. Never its column: that is pm task status, which the QA rules are about.
+        const { keys, rest: extra } = await leadingKeys(rest);
+        if (extra.length) fail(`"${extra[0]}" is not a task key. Usage: ${REORDER_USAGE}`);
+        const places = PLACES.filter((p) => flags[p] !== undefined);
+        if (places.length !== 1) fail(`Say where with one of --top, --bottom, --before or --after. Usage: ${REORDER_USAGE}`);
+        const place = places[0];
+        const { status, statusLabel } = await get(`/api/v1/tasks/${keys[0]}`);
+        const column = async () => (await get('/api/v1/tasks' + qs({ status, limit: 5000, summary: 1 }))).tasks;
+        const col = await column();
+        const inColumn = new Map(col.map((t) => [t.key, t]));
+        const notHere = async (key) => {
+          const t = await get(`/api/v1/tasks/${key}`);
+          fail(`${t.key} is in ${t.statusLabel}, not ${statusLabel}. pm task reorder only changes the order inside one column (pm task status moves a task to another column).`);
+        };
+        for (const k of keys) if (!inColumn.has(k)) await notHere(k);
+        const others = col.filter((t) => !keys.includes(t.key));
+        // They go right above others[at]; others.length means at the bottom.
+        let at = place === 'top' ? 0 : others.length;
+        if (place === 'before' || place === 'after') {
+          const anchor = await taskRef(flags[place], `task key after --${place}`);
+          if (keys.includes(anchor)) fail(`${anchor} is one of the tasks being moved. Name another task after --${place}.`);
+          const i = others.findIndex((t) => t.key === anchor);
+          if (i === -1) await notHere(anchor);
+          at = place === 'before' ? i : i + 1;
+        }
+        const target = [...others.slice(0, at), ...keys.map((k) => inColumn.get(k)), ...others.slice(at)];
+        const already = target.every((t, i) => t.id === col[i].id);
+        if (!already) {
+          const beforeId = others[at]?.id ?? null;
+          if (keys.length === 1) await post(`/api/v1/tasks/${keys[0]}/move`, { status, beforeId });
+          else await post('/api/v1/tasks/bulk', { action: 'move', ids: keys, status, beforeId });
+        }
+        const now = already ? col : await column();
+        return out(flags, { status, order: now.map((t) => t.key) }, () => {
+          const spots = keys.map((k) => now.findIndex((t) => t.key === k)).filter((i) => i >= 0).sort((a, b) => a - b);
+          if (!spots.length) return console.log(`Moved ${keys.join(', ')}`);
+          const first = spots[0];
+          const last = spots.at(-1);
+          const where = first === 0 ? `at the top of ${statusLabel}` : last === now.length - 1 ? `at the bottom of ${statusLabel}` : `in ${statusLabel}`;
+          const range = first === last ? `${first + 1}` : `${first + 1}-${last + 1}`;
+          const near = [first > 0 && `below ${now[first - 1].key}`, last < now.length - 1 && `above ${now[last + 1].key}`].filter(Boolean).join(', ');
+          const verb = `${keys.length === 1 ? 'is' : 'are'}${already ? '' : ' now'}`;
+          console.log(`${already ? 'Already there: ' : ''}${keys.join(', ')} ${verb} ${where} (${range} of ${now.length})${near ? `, ${near}` : ''}`);
+        });
       }
       case 'note':
       case 'comment': {
@@ -465,7 +525,7 @@ const commands = {
         return console.log(`Deleted ${key}`);
       }
       default:
-        fail(`Unknown task command "${sub ?? ''}". Try: list, get, subtasks, create, update, advance, status, note, check, link, unlink, delete`);
+        fail(`Unknown task command "${sub ?? ''}". Try: list, get, subtasks, create, update, advance, status, reorder, note, check, link, unlink, delete`);
     }
   },
 
@@ -1192,6 +1252,7 @@ Projects: pm project list | current | create --key APP --name "My app" [--color 
 Tasks (keys look like APP-12; a bare 12 means task 12 of the current project):
   pm task list [--status S] [--category C] [--type T] [--priority P] [--epoch E|none] [--folder F|inbox] [--created-by NAME] [--q text]
                [--parent APP-3|none|any]           a task's own sub-tasks | top-level tasks only | sub-tasks only
+                                                  (in board order: column by column, each from the top down)
   pm task get APP-12
   pm task subtasks APP-3                          its own sub-tasks and how many are done (sub-tasks can have
                                                   sub-tasks too, up to 5 levels deep)
@@ -1204,6 +1265,9 @@ Tasks (keys look like APP-12; a bare 12 means task 12 of the current project):
                                                   --title and --desc
   pm task advance APP-12 [--note "why"]           move to the next Kanban column
   pm task status APP-12 [APP-13 ...] "Alpha QA" [--note ".."]   set any status, on one task or several
+  pm task reorder APP-12 --top | --bottom | --before APP-9 | --after APP-9
+                                                  its place in its column (never its column)
+  pm task reorder APP-3 APP-7 APP-5 --top         several: together, in the order given (all in one column)
   pm task note APP-12 "progress message"
   pm task check APP-12 "checklist item"           add checklist item
   pm item 34 [--undo] [--text ".."] [--remove]    tick / untick / reword / remove a checklist item (ids shown by task get)

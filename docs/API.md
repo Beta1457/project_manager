@@ -53,13 +53,13 @@ A task reference is its key (`APP-12`, case-insensitive) or its numeric `id`. A 
 
 | Endpoint | Notes |
 |---|---|
-| `GET /api/v1/tasks` | Query: `q` (text, or a key like `APP-12`; keys of other projects match nothing), `status`, `type`, `category`, `priority` (comma-separated lists), `epoch` (id or `none`), `folder` (id — includes sub-folders and their epochs — or `inbox`), `parent` (a task's key or id for its own sub-tasks, `none` for top-level tasks only, `any` for sub-tasks only), `createdBy`, `limit`, `summary=1` (omit descriptions) |
+| `GET /api/v1/tasks` | Query: `q` (text, or a key like `APP-12`; keys of other projects match nothing), `status`, `type`, `category`, `priority` (comma-separated lists), `epoch` (id or `none`), `folder` (id — includes sub-folders and their epochs — or `inbox`), `parent` (a task's key or id for its own sub-tasks, `none` for top-level tasks only, `any` for sub-tasks only), `createdBy`, `limit`, `summary=1` (omit descriptions). Tasks are sorted by `sortOrder`, which is their place in their column on the board (top first). |
 | `GET /api/v1/tasks/:ref` | Includes `checklistItems`, `links`, `ancestors` (the tasks above it as `{id, key, title}`, from the top-level task down to its parent), `children` (its own sub-tasks, oldest first, without descriptions) and `activity` |
 | `POST /api/v1/tasks` | `{title*, description, type, status, priority, epochId, folderId, parent: "APP-3" \| 3, categories: [names or ids], checklist: [text], estimate: "1h30m" \| estimateMinutes, note}`. With `template` (a name or id), the task and its sub-tasks come from that template: see [Task templates](#task-templates). |
 | `PATCH /api/v1/tasks/:ref` | Any of the create fields. Setting `epochId` moves the task into the epoch; setting `folderId` (or `null` = inbox) removes it from its epoch. `note` is logged with a status change. `parent` makes it a sub-task of another task; `null` (or `"none"`) makes it a top-level task again. |
 | `POST /api/v1/tasks/:ref/advance` | `{note?}` → next status |
 | `POST /api/v1/tasks/:ref/status` | `{status*, note?}` |
-| `POST /api/v1/tasks/:ref/move` | Board ordering: `{status*, beforeId?}` (null = end of column) |
+| `POST /api/v1/tasks/:ref/move` | Board order: `{status*, beforeId?}` puts the task in column `status`, right above the task `beforeId` (an internal id). Left out or null, or a task that isn't in that column: at the bottom. Only a change of column is logged in the activity. |
 | `POST /api/v1/tasks/:ref/comments` | `{message*}` |
 | `POST /api/v1/tasks/:ref/checklist` | `{text*}` |
 | `PATCH /api/v1/checklist/:itemId` | `{text?, done?}` |

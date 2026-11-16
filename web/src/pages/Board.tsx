@@ -29,7 +29,7 @@ import { BulkBar } from '../components/BulkBar';
 import { FilterBar, useFilters } from '../components/Filters';
 import { PageHeader, useTaskParam } from '../components/Layout';
 import { TaskCard } from '../components/TaskCard';
-import { QuickAdd, StatusPicker } from '../components/QuickAdd';
+import { QuickAdd, StatusPicker, type Reorder } from '../components/QuickAdd';
 import { Spinner } from '../components/Bits';
 
 /**
@@ -188,6 +188,19 @@ export function BoardView({ scope = {} }: { scope?: TaskFilters }) {
     if (i >= 0 && i < list.length) void moveTasks([task], list[i].id, null);
   };
 
+  /** Moves a card inside its column (Move to… on phones): to the top or bottom, or one place up or down. */
+  const reorder = async (id: number, to: Reorder) => {
+    const task = tasks?.find((t) => t.id === id);
+    if (!task) return;
+    const col = byStatus[task.status] ?? [];
+    const i = col.findIndex((t) => t.id === id);
+    const others = col.filter((t) => t.id !== id);
+    // The card it goes above, counted without the card itself (past the last one: the bottom).
+    const at = { top: 0, up: Math.max(i - 1, 0), down: i + 1, bottom: others.length }[to];
+    const beforeId = others[at]?.id ?? null;
+    if (i !== -1 && !alreadyThere([task], task.status, beforeId)) await moveTasks([task], task.status, beforeId);
+  };
+
   const onDragStart = (e: DragStartEvent) => setDragging((e.active.data.current?.task as Task) ?? null);
   const onDragMove = (e: DragMoveEvent) => {
     const after = isLowerHalf(e);
@@ -226,6 +239,10 @@ export function BoardView({ scope = {} }: { scope?: TaskFilters }) {
 
   // The cards a drag carries look picked up; the overlay under the pointer says how many there are.
   const carried = dragging ? new Set(dragGroup(dragging).map((t) => t.id)) : null;
+
+  // The card whose Move to… sheet is open, as it is now: moving it inside its column keeps the sheet open.
+  const movingNow = moving && (tasks?.find((t) => t.id === moving.id) ?? moving);
+  const movingCol = movingNow ? (byStatus[movingNow.status] ?? []) : [];
 
   return (
     <>
@@ -271,7 +288,13 @@ export function BoardView({ scope = {} }: { scope?: TaskFilters }) {
         </DragOverlay>
       </DndContext>
       <BulkBar selection={selection} tasks={selectedTasks} total={ordered.length} />
-      {moving && <StatusPicker current={moving.status} onClose={() => setMoving(null)} onPick={(s) => moveTasks([moving], s, null)} />}
+      {movingNow && (
+        <StatusPicker current={movingNow.status} onClose={() => setMoving(null)}
+          onPick={(s) => {
+            if (s !== movingNow.status) void moveTasks([movingNow], s, null);
+          }}
+          order={{ index: movingCol.findIndex((t) => t.id === movingNow.id), count: movingCol.length, onPick: (to) => reorder(movingNow.id, to) }} />
+      )}
       {addingIn && (
         <QuickAdd onClose={() => setAddingIn(null)} defaults={{ status: addingIn, epochId: scope.epoch ? Number(scope.epoch) : null }} onCreated={openTask} />
       )}

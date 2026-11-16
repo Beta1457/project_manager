@@ -206,11 +206,56 @@ export function QuickAdd({ onClose, onCreated, defaults = {} }: Props) {
   );
 }
 
-export function StatusPicker({ current, onPick, onClose }: { current: string; onPick: (status: string) => void; onClose: () => void }) {
+/** Where the Move to… sheet can put a card inside its own column. */
+export type Reorder = 'top' | 'up' | 'down' | 'bottom';
+
+/**
+ * Moves a card to another column. With `order` it can also move the card inside its own column, for phones,
+ * which have no drag and drop. Those buttons keep the sheet open, so a card can go up or down a few places.
+ */
+export function StatusPicker({ current, onPick, onClose, order }: {
+  current: string;
+  onPick: (status: string) => void;
+  onClose: () => void;
+  /** The card's place in its column (0 = the top), how many cards the column has, and the move to make. */
+  order?: { index: number; count: number; onPick: (to: Reorder) => Promise<void> };
+}) {
   const meta = useMeta().data;
+  // One move at a time: the next one is worked out from where the last one put the card.
+  const [busy, setBusy] = useState(false);
+  const label = meta?.statuses.find((s) => s.id === current)?.label ?? current;
+  const place = (to: Reorder) => async () => {
+    setBusy(true);
+    try {
+      await order?.onPick(to);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const atTop = !order || order.index <= 0;
+  const atBottom = !order || order.index >= order.count - 1;
+  const moves: Array<[Reorder, string, string, boolean]> = [
+    ['top', '⤒', 'Top', atTop],
+    ['up', '↑', 'Up', atTop],
+    ['bottom', '⤓', 'Bottom', atBottom],
+    ['down', '↓', 'Down', atBottom],
+  ];
   return (
     <Sheet title="Move to" onClose={onClose} variant="center">
       <div className="stack" style={{ gap: 6 }}>
+        {order && order.index >= 0 && order.count > 1 && (
+          <>
+            <div className="muted small">Place in {label}: {order.index + 1} of {order.count}</div>
+            <div className="order-moves">
+              {moves.map(([to, icon, text, off]) => (
+                <button key={to} type="button" className="btn" disabled={busy || off} onClick={place(to)}>
+                  <span aria-hidden>{icon}</span> {text}
+                </button>
+              ))}
+            </div>
+            <div className="muted small">Column</div>
+          </>
+        )}
         {meta?.statuses.map((s) => (
           <button key={s.id} className={`btn ${s.id === current ? 'btn-primary' : ''}`} style={{ justifyContent: 'flex-start', minHeight: 46 }}
             onClick={() => { onPick(s.id); onClose(); }}>
