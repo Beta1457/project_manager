@@ -33,6 +33,8 @@ export interface DockLabel {
   title: string;
   /** A task's status colour. */
   color?: string;
+  /** A file's folder (null: the top of the project), so its tab can say where it is. */
+  folder?: number | null;
 }
 
 export interface DockItem {
@@ -269,7 +271,7 @@ export function closeTabs(state: DockState, except?: string): DockState {
 }
 
 const sameLabel = (a: DockLabel | undefined, b: DockLabel) =>
-  !!a && a.id === b.id && a.code === b.code && a.title === b.title && a.color === b.color;
+  !!a && a.id === b.id && a.code === b.code && a.title === b.title && a.color === b.color && a.folder === b.folder;
 
 /**
  * What an item's tab shows, as its panel reports it. A task opened twice (by key and by id) turns out to be one
@@ -292,6 +294,31 @@ export function setLabel(state: DockState, key: string, label: DockLabel): DockS
   return keepTab(close(next, twin.key), key, twin.kept);
 }
 
+/**
+ * Tabs of files with the same name, told apart: for each, as few of its folders (innermost first) as no other
+ * tab of that name shares. World 1 / Level 1.md beside World 2 / Level 1.md gets ["World 1"]; a file at the top
+ * of the project gets nothing. `dirsOf` gives a file's folders from the top. Returns the folders by item key.
+ */
+export function tabHints(items: DockItem[], dirsOf: (item: DockItem) => string[]): Map<string, string[]> {
+  const byName = new Map<string, DockItem[]>();
+  for (const i of items) {
+    if (i.kind === 'file' && i.label) byName.set(i.label.title, [...(byName.get(i.label.title) ?? []), i]);
+  }
+  const hints = new Map<string, string[]>();
+  const tail = (dirs: string[], n: number) => JSON.stringify(dirs.slice(-n));
+  for (const group of byName.values()) {
+    if (group.length < 2) continue;
+    const dirs = group.map(dirsOf);
+    group.forEach((item, g) => {
+      const mine = dirs[g];
+      let n = 1;
+      while (n < mine.length && dirs.some((d, o) => o !== g && tail(d, n) === tail(mine, n))) n++;
+      if (mine.length > 0) hints.set(item.key, mine.slice(-n));
+    });
+  }
+  return hints;
+}
+
 /** A dock read back from storage: anything malformed is dropped, so a bad copy can't break the page. */
 export function normalize(raw: unknown): DockState {
   if (!raw || typeof raw !== 'object') return EMPTY;
@@ -312,6 +339,7 @@ export function normalize(raw: unknown): DockState {
             ...(Number.isInteger(l.id) && { id: l.id }),
             ...(typeof l.code === 'string' && { code: l.code.slice(0, 30) }),
             ...(typeof l.color === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(l.color) && { color: l.color }),
+            ...((l.folder === null || (typeof l.folder === 'number' && Number.isInteger(l.folder) && l.folder > 0)) && { folder: l.folder }),
           }
         : undefined;
     items.push({ key, kind: i.kind, ref, kept: i.kept === true, ...(label && { label }) });

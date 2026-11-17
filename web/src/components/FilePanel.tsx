@@ -2,10 +2,11 @@ import { memo, useEffect, useRef, useState } from 'react';
 import { api, V1 } from '../api';
 import { useDock, useOpenFile, usePanel } from '../dock/context';
 import { PanelFrame } from '../dock/PanelFrame';
-import { useFile } from '../hooks';
+import { useFile, useFolders } from '../hooks';
 import type { FileItem } from '../types';
 import { errorMessage, formatBytes } from '../util';
 import { Markdown, Spinner } from './Bits';
+import { folderParts } from './Filters';
 import { MarkdownEditor } from './MarkdownEditor';
 import { useToast } from './Toast';
 
@@ -20,21 +21,40 @@ export const FilePanel = memo(function FilePanel() {
   const panel = usePanel();
   const dock = useDock();
   const id = Number(panel.item.ref);
-  // Loaded by id, so a doc can stay open while you move around the app. Minimized: no refresh until shown.
-  const { data: file, error } = useFile(id, panel.shown || !panel.item.label);
+  const label = panel.item.label;
+  // Loaded by id, so a doc can stay open while you move around the app. Minimized: no refresh until shown, once
+  // its tab knows the file's name and folder.
+  const { data: file, error } = useFile(id, panel.shown || label?.folder === undefined);
   useEffect(() => {
-    if (file) dock.setLabel(panel.key, { title: file.name });
-  }, [dock, panel.key, file?.name]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (file) dock.setLabel(panel.key, { title: file.name, folder: file.folderId });
+  }, [dock, panel.key, file?.name, file?.folderId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!file) {
     return (
-      <PanelFrame title={panel.item.label?.title ?? 'File'}>
+      <PanelFrame title={label ? <FilePath folder={label.folder ?? null} name={label.title} /> : 'File'}>
         {error ? <div className="empty">{errorMessage(error)}</div> : <Spinner />}
       </PanelFrame>
     );
   }
   return <FileView key={file.id} file={file} />;
 });
+
+/**
+ * Where a file is in the project: "Design / Levels / Level 1.md", so files with the same name in different
+ * folders can be told apart. When it doesn't fit, the top folders give way first (styles.css: .file-path).
+ */
+function FilePath({ folder, name }: { folder: number | null; name: string }) {
+  const { data: folders } = useFolders();
+  const dirs = folder !== null && folders ? folderParts(folders, folder) : [];
+  return (
+    <span className="file-path" title={[...dirs, name].join(' / ')}>
+      <span dir="ltr">
+        {dirs.length > 0 && <span className="file-path-dirs">{`${dirs.join(' / ')} / `}</span>}
+        {name}
+      </span>
+    </span>
+  );
+}
 
 function FileView({ file }: { file: FileItem }) {
   const panel = usePanel();
@@ -164,7 +184,7 @@ function FileView({ file }: { file: FileItem }) {
 
   return (
     <PanelFrame
-      title={file.name}
+      title={<FilePath folder={file.folderId} name={file.name} />}
       actions={
         <>
           {isText && (editing ? (

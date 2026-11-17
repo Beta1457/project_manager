@@ -209,7 +209,8 @@ export function FilterBar({ hide = [] }: { hide?: Array<keyof TaskFilters> }) {
   );
 }
 
-export function folderPath(folders: Array<{ id: number; parentId: number | null; name: string }>, id: number): string {
+/** A folder's place in the project, from the top: ["Design", "Levels"]. */
+export function folderParts(folders: Array<{ id: number; parentId: number | null; name: string }>, id: number): string[] {
   const parts: string[] = [];
   let cur = folders.find((f) => f.id === id);
   let guard = 0;
@@ -218,5 +219,10 @@ export function folderPath(folders: Array<{ id: number; parentId: number | null;
     const parentId = cur.parentId;
     cur = parentId === null ? undefined : folders.find((f) => f.id === parentId);
   }
-  return parts.join(' / ');
+  return parts;
+}
+
+/** "Design / Levels" */
+export function folderPath(folders: Array<{ id: number; parentId: number | null; name: string }>, id: number): string {
+  return folderParts(folders, id).join(' / ');
 }

@@ -19,7 +19,9 @@ import {
   restore,
   setLabel,
   swap,
+  tabHints,
   trayItems,
+  type DockItem,
   type DockState,
 } from '../web/src/dock/model.ts';
 
@@ -246,6 +248,10 @@ test('a dock read back from storage keeps what is valid and drops the rest', () 
       { kind: 'task', ref: 'app-4', kept: false },
       { kind: 'task', ref: 5, kept: false },
       { kind: 'file', ref: 'x', kept: true },
+      { kind: 'file', ref: 7, kept: true, label: { title: 'a.md', folder: 4 } },
+      { kind: 'file', ref: 8, kept: true, label: { title: 'b.md', folder: null } },
+      { kind: 'file', ref: 9, kept: true, label: { title: 'c.md', folder: 'x' } },
+      { kind: 'file', ref: 10, kept: true, label: { title: 'd.md', folder: -1 } },
       { kind: 'nope', ref: 1, kept: true },
       { kind: 'task', ref: 3, kept: true },
       null,
@@ -255,11 +261,57 @@ test('a dock read back from storage keeps what is valid and drops the rest', () 
     seq: 7,
   };
   const s = normalize(raw);
-  assert.deepEqual(keys(s), ['task:3', 'task:APP-4'], 'task:5 was transient and off screen; junk dropped');
+  assert.deepEqual(keys(s), ['task:3', 'task:APP-4', 'file:7', 'file:8', 'file:9', 'file:10'], 'task:5 was transient and off screen; junk dropped');
   assert.equal(s.items[0].request, undefined, 'requests are not saved');
+  assert.deepEqual(s.items.slice(2).map((i) => i.label), [
+    { title: 'a.md', folder: 4 },
+    { title: 'b.md', folder: null },
+    { title: 'c.md' },
+    { title: 'd.md' },
+  ], "a file's folder is kept when it is one (null: the top of the project)");
   assert.deepEqual(s.slots, [{ key: 'task:APP-4', back: [{ kind: 'task', ref: 3 }] }]);
   assert.equal(s.active, 'task:APP-4');
   assert.equal(s.seq, 7);
   assert.deepEqual(normalize('garbage'), EMPTY);
   assert.deepEqual(normalize(JSON.parse(JSON.stringify(s))), s, 'a saved dock reads back the same');
+});
+
+test('a file moved to another folder gets a new label; the same label changes nothing', () => {
+  let s = withTabs(file(7));
+  s = setLabel(s, 'file:7', { title: 'a.md', folder: 4 });
+  assert.equal(setLabel(s, 'file:7', { title: 'a.md', folder: 4 }), s);
+  s = setLabel(s, 'file:7', { title: 'a.md', folder: null });
+  assert.equal(s.items[0].label?.folder, null);
+});
+
+test('tabs of files with the same name show as few of their folders as tell them apart', () => {
+  const folders: Record<number, string[]> = {
+    1: ['Design', 'Levels', 'World 1'],
+    2: ['Design', 'Levels', 'World 2'],
+    3: ['Art', 'Ideas'],
+    4: ['Audio', 'Ideas'],
+    5: ['Ideas'],
+  };
+  const dirsOf = (i: DockItem) => (i.label?.folder ? folders[i.label.folder] : []);
+  const labelled = (...files: Array<[number, string, number | null]>) =>
+    files.reduce((s, [ref, title, folder]) => setLabel(s, `file:${ref}`, { title, folder }), withTabs(...files.map(([ref]) => file(ref))));
+  const hints = (s: DockState) => Object.fromEntries(tabHints(trayItems(s), dirsOf));
+
+  // The folder each is in tells them apart; a name no other tab has needs nothing.
+  assert.deepEqual(hints(labelled([10, 'Level 1.md', 1], [11, 'Level 1.md', 2], [12, 'Notes.md', 3])), {
+    'file:10': ['World 1'],
+    'file:11': ['World 2'],
+  });
+  // Same folder name, different places: one more folder up. A folder that is the whole path of the other: all of it.
+  assert.deepEqual(hints(labelled([20, 'todo.md', 3], [21, 'todo.md', 4], [22, 'todo.md', 5])), {
+    'file:20': ['Art', 'Ideas'],
+    'file:21': ['Audio', 'Ideas'],
+    'file:22': ['Ideas'],
+  });
+  // A file at the top of the project has no folders to show; the other shows its own.
+  assert.deepEqual(hints(labelled([30, 'README.md', null], [31, 'README.md', 1])), { 'file:31': ['World 1'] });
+  // Tasks never need one: their keys differ.
+  let t = withTabs(task(1), task(2));
+  t = setLabel(setLabel(t, 'task:1', { id: 1, code: 'APP-1', title: 'Same' }), 'task:2', { id: 2, code: 'APP-2', title: 'Same' });
+  assert.deepEqual(hints(t), {});
 });

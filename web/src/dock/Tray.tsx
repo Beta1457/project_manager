@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { ActionSheet, ContextMenu, type MenuNode, type MenuPosition } from '../components/ContextMenu';
+import { folderParts } from '../components/Filters';
+import { useFolders } from '../hooks';
 import { cx } from '../util';
 import { useDock, useDockState, useWideScreen } from './context';
-import { isShown, trayItems, type DockItem } from './model';
+import { isShown, tabHints, trayItems, type DockItem } from './model';
 
 type TabAction = 'show' | 'show-left' | 'show-right' | 'minimize' | 'move-left' | 'move-right' | 'close' | 'close-others' | 'close-all';
 
@@ -52,6 +54,15 @@ export function Tray({ onFocusTab }: { onFocusTab: (key: string) => void }) {
   const state = useDockState();
   const wide = useWideScreen();
   const tabs = trayItems(state);
+  // Where files are in the project. Tabs of files with the same name show enough of it to tell them apart.
+  const { data: folders } = useFolders();
+  const dirsOf = (item: DockItem) => (item.kind === 'file' && item.label?.folder && folders ? folderParts(folders, item.label.folder) : []);
+  const hints = tabHints(tabs, dirsOf);
+  /** A task's key and title; a file's path in the project. */
+  const fullName = (item: DockItem) => {
+    const { code, title } = tabText(item);
+    return item.kind === 'file' ? [...dirsOf(item), title].join(' / ') : [code, title].filter(Boolean).join(' ');
+  };
   const barRef = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
   const dragRef = useRef<Drag | null>(null);
@@ -309,6 +320,11 @@ export function Tray({ onFocusTab }: { onFocusTab: (key: string) => void }) {
           const active = state.active === item.key;
           const { code, title } = tabText(item);
           const name = [code, title].filter(Boolean).join(' ');
+          const dirs = dirsOf(item);
+          const hint = hints.get(item.key);
+          // Before the name ("World 1 / Level 1.md"), so it stays when a narrow tab cuts the end off.
+          const where = hint ? `${hint.join(' / ')} / ` : '';
+          const label = dirs.length > 0 ? `${name}, in ${dirs.join(' / ')}` : name;
           return (
             <div
               key={item.key}
@@ -335,8 +351,8 @@ export function Tray({ onFocusTab }: { onFocusTab: (key: string) => void }) {
                 type="button"
                 className="tray-tab-main"
                 aria-pressed={shown}
-                aria-label={name}
-                title={`${name}\n${active ? 'Click to minimize' : 'Click to show'} · drag to move · right-click for more`}
+                aria-label={label}
+                title={`${fullName(item)}\n${active ? 'Click to minimize' : 'Click to show'} · drag to move · right-click for more`}
                 onClick={() => onTabClick(item.key)}
                 onKeyDown={(e) => onTabKey(e, item.key)}
               >
@@ -346,10 +362,11 @@ export function Tray({ onFocusTab }: { onFocusTab: (key: string) => void }) {
                   <span className="tray-ico" aria-hidden="true">{fileIcon(title)}</span>
                 )}
                 <span className="tray-tab-text">
+                  {where && <span className="tray-tab-dirs">{where}</span>}
                   {code && <span className="key">{code}</span>} {title}
                 </span>
               </button>
-              <button type="button" className="tray-tab-close" aria-label={`Close ${name}`} title="Close" onClick={() => closeTab(item.key)}>
+              <button type="button" className="tray-tab-close" aria-label={`Close ${label}`} title="Close" onClick={() => closeTab(item.key)}>
                 ✕
               </button>
             </div>
@@ -376,7 +393,7 @@ export function Tray({ onFocusTab }: { onFocusTab: (key: string) => void }) {
       {menu && (
         <ContextMenu
           key={`${menu.key}-${menu.focusFirst}`}
-          label={`Tab ${tabText(tabs.find((t) => t.key === menu.key) ?? tabs[0]).title}`}
+          label={`Tab ${fullName(tabs.find((t) => t.key === menu.key) ?? tabs[0])}`}
           nodes={menuNodes(menu.key)}
           at={menu.at}
           returnFocus={menu.returnFocus}
@@ -390,10 +407,8 @@ export function Tray({ onFocusTab }: { onFocusTab: (key: string) => void }) {
         // In the body, after the panels: the sheet has to cover them too.
         createPortal(
           <ActionSheet
-            title={(() => {
-              const { code, title } = tabText(tabs.find((t) => t.key === sheetFor)!);
-              return [code, title].filter(Boolean).join(' ');
-            })()}
+            // A file's whole path: on a phone the tabs have no room for it, and nothing to hover.
+            title={fullName(tabs.find((t) => t.key === sheetFor)!)}
             nodes={menuNodes(sheetFor)}
             onPick={(id) => pick(sheetFor, id)}
             onClose={() => setSheetFor(null)}

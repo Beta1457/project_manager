@@ -221,6 +221,10 @@ html.resizing, html.resizing * { cursor: col-resize !important; user-select: non
 .dock-panel[hidden] { display: none; } /* minimized: still mounted, so drafts in it survive */
 .dock-panel:focus { outline: none; } /* focused programmatically when it opens, for screen readers */
 .dock-title { font-weight: 700; }
+/* A file's place in the project (FilePanel.tsx). Too long to fit, it gives way at the start, keeping the name and
+   the folders nearest it: right-to-left only so the cut is on the left; the path inside still reads left to right. */
+.file-path { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.file-path-dirs { color: var(--muted); font-weight: 500; }
 .dock-head .btn-sm { white-space: nowrap; }
 /* The minimize button's bar sits low, as on a window. */
 .minimize-icon { display: block; width: 12px; height: 2px; margin: 8px auto 0; border-radius: 1px; background: currentColor; }
@@ -273,6 +277,7 @@ html.resizing, html.resizing * { cursor: col-resize !important; user-select: non
 .tray-dot { flex: none; width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
 .tray-ico { flex: none; font-size: 0.95rem; line-height: 1; }
 .tray-tab-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tray-tab-dirs { color: var(--muted); } /* where a file is, when another tab has the same name */
 html.dock-dragging, html.dock-dragging * { cursor: grabbing !important; user-select: none !important; }
 .tray-ghost {
   position: fixed; z-index: 56; pointer-events: none; max-width: 260px; padding: 6px 10px; border-radius: 8px;
