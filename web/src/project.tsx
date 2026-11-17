@@ -45,17 +45,15 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
   setCurrentProject(project?.id ?? null);
 
   const switchTo = useCallback(
-    (id: number, opts: { keepTask?: boolean } = {}) => {
+    (id: number, opts: { task?: number | string } = {}) => {
       store(id);
       setCurrentProject(id);
       setChosen(id);
       // A single epoch's page and the list filters (epoch, folder, category ids) belong to the old project.
-      const { pathname, search } = window.location;
-      const task = opts.keepTask ? new URLSearchParams(search).get('task') : null;
-      navigate(
-        { pathname: pathname.startsWith('/epochs/') ? '/epochs' : pathname, search: task ? `?task=${encodeURIComponent(task)}` : '' },
-        { replace: true },
-      );
+      // The new project's dock reads ?task= when it starts; the old one's panels stay with the old project.
+      const { pathname } = window.location;
+      const task = opts.task !== undefined ? `?task=${encodeURIComponent(String(opts.task))}` : '';
+      navigate({ pathname: pathname.startsWith('/epochs/') ? '/epochs' : pathname, search: task }, { replace: true });
     },
     [navigate],
   );

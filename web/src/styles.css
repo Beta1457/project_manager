@@ -211,6 +211,91 @@ label.field > * { font-weight: 400; color: var(--text); font-size: 1rem; }
 /* While a handle is dragged the pointer may leave it: keep the resize cursor, and select no text on the way. */
 html.resizing, html.resizing * { cursor: col-resize !important; user-select: none !important; }
 
+/* ---------- Dock (dock/*.tsx): task and file panels on the right, minimized tabs along the bottom ---------- */
+:root { --tray-h: 44px; }
+.dock { display: contents; } /* its parts place themselves (fixed); the element only holds them together for focus */
+.dock-backdrop { position: fixed; inset: 0; z-index: 50; background: rgb(15 23 42 / 0.45); }
+.dock-panels { display: none; }
+.dock-panels.open { position: fixed; inset: 0; z-index: 50; display: flex; background: var(--surface); box-shadow: var(--shadow-lg); }
+.dock-panel { position: relative; flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; background: var(--surface); }
+.dock-panel[hidden] { display: none; } /* minimized: still mounted, so drafts in it survive */
+.dock-panel:focus { outline: none; } /* focused programmatically when it opens, for screen readers */
+.dock-title { font-weight: 700; }
+.dock-head .btn-sm { white-space: nowrap; }
+/* The minimize button's bar sits low, as on a window. */
+.minimize-icon { display: block; width: 12px; height: 2px; margin: 8px auto 0; border-radius: 1px; background: currentColor; }
+@media (min-width: 900px) {
+  .dock-panels.open { left: auto; width: clamp(420px, var(--sheet-w, 640px), calc(100vw - 80px)); }
+  .dock-panels.open.pair { width: clamp(760px, var(--pair-w, 1240px), calc(100vw - 80px)); }
+  .dock.with-tray .dock-panels.open { bottom: var(--tray-h); }
+  /* The left panel's share, dragged on the line between the two; neither gets narrower than 360px (DockLayer.tsx). */
+  .dock-panels.pair .dock-panel:not(.right) { flex: 0 0 clamp(360px, calc(var(--split, 0.5) * 100%), calc(100% - 360px)); }
+  .dock-panels.pair .dock-panel.right { border-left: 1px solid var(--border); }
+  .dock-panels .dock-divider { left: calc(clamp(360px, calc(var(--split, 0.5) * 100%), calc(100% - 360px)) - 6px); }
+  /* Two side by side: the one worked in (Esc and Back act on it) is marked. */
+  .dock-panels.pair .dock-panel.active > .dock-head { box-shadow: inset 0 3px 0 var(--primary); }
+}
+
+.tray {
+  position: fixed; z-index: 45; left: 0; right: 0; bottom: calc(var(--nav-h) + var(--safe-bottom)); height: var(--tray-h);
+  display: flex; align-items: center; gap: 6px; padding: 0 8px;
+  background: var(--surface); border-top: 1px solid var(--border); box-shadow: 0 -4px 12px rgb(15 23 42 / 0.06);
+  overflow-x: auto; overflow-y: hidden; scrollbar-width: none; overscroll-behavior-x: contain;
+  user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+}
+.tray::-webkit-scrollbar { display: none; }
+.dock.open .tray { z-index: 50; } /* above the dimmed page, so a tab can join the panels */
+@media (max-width: 899px) { .dock.open .tray { display: none; } } /* a panel fills a phone's screen */
+@media (min-width: 900px) { .tray { left: 220px; bottom: 0; } } /* right of the sidebar */
+.tray-tab {
+  position: relative; flex: 0 1 220px; min-width: 132px; max-width: 240px; height: 34px; display: flex; align-items: center;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2);
+}
+.tray-tab-main {
+  flex: 1; min-width: 0; height: 100%; display: flex; align-items: center; gap: 6px; padding: 0 2px 0 10px;
+  border: 0; border-radius: 8px 0 0 8px; background: none; color: var(--text); font-size: 0.85rem; text-align: left; cursor: pointer;
+}
+.tray-tab-close {
+  flex: none; width: 30px; height: 100%; border: 0; border-radius: 0 8px 8px 0;
+  background: none; color: var(--muted); font-size: 0.8rem; cursor: pointer;
+}
+.tray-tab-main:hover, .tray-tab-close:hover { background: color-mix(in srgb, var(--primary) 8%, transparent); }
+.tray-tab-close:hover { color: var(--danger); }
+.tray-tab-main:focus-visible, .tray-tab-close:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+.tray-tab.shown { border-color: var(--primary); background: var(--primary-soft); }
+.tray-tab.active { box-shadow: inset 0 -3px 0 var(--primary); }
+.tray-tab.dragging { opacity: 0.4; }
+.tray-tab.drop-before::before, .tray-tab.drop-after::after {
+  content: ''; position: absolute; top: 3px; bottom: 3px; width: 3px; border-radius: 2px; background: var(--primary);
+}
+.tray-tab.drop-before::before { left: -5px; }
+.tray-tab.drop-after::after { right: -5px; }
+.tray-dot { flex: none; width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+.tray-ico { flex: none; font-size: 0.95rem; line-height: 1; }
+.tray-tab-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+html.dock-dragging, html.dock-dragging * { cursor: grabbing !important; user-select: none !important; }
+.tray-ghost {
+  position: fixed; z-index: 56; pointer-events: none; max-width: 260px; padding: 6px 10px; border-radius: 8px;
+  background: var(--surface); border: 1px solid var(--primary); box-shadow: var(--shadow-lg); font-size: 0.85rem;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* A tab dragged up off the tray: where it would show. */
+.dock-drop {
+  position: fixed; z-index: 55; top: 0; left: 0; right: 0; bottom: calc(var(--nav-h) + var(--tray-h) + var(--safe-bottom));
+  display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 16px; pointer-events: none;
+}
+.dock-drop.single { grid-template-columns: 1fr; }
+@media (min-width: 900px) { .dock-drop { left: 220px; bottom: var(--tray-h); } }
+.dock-drop-zone {
+  display: grid; place-items: center; border: 2px dashed var(--primary); border-radius: 14px; font-weight: 700;
+  color: var(--primary); background: color-mix(in srgb, var(--primary) 6%, transparent);
+}
+.dock-drop-zone.over { background: color-mix(in srgb, var(--primary) 20%, transparent); }
+/* The page keeps clear of the tray; the + button moves up above it. */
+.app.has-tray .main { padding-bottom: var(--tray-h); }
+.app.has-tray .fab { bottom: calc(var(--nav-h) + var(--tray-h) + 16px + var(--safe-bottom)); }
+@media (min-width: 900px) { .app.has-tray .fab { bottom: calc(var(--tray-h) + 24px); } }
+
 /* ---------- Confirm dialog (components/Confirm.tsx) ---------- */
 .confirm-layer > .overlay { z-index: 60; } /* above sheets that are already open */
 .confirm-body { white-space: pre-line; line-height: 1.5; }

@@ -3,7 +3,8 @@ import { Link } from 'react-router-dom';
 import { useEpochs, useTime } from '../hooks';
 import { formatMinutes } from '../util';
 import { Spinner } from '../components/Bits';
-import { PageHeader, useTaskParam } from '../components/Layout';
+import { PageHeader } from '../components/Layout';
+import { useOpenTask } from '../dock/context';
 
 const RANGES = {
   today: 'Today',
@@ -27,7 +28,7 @@ export function TimePage() {
   const epochs = useEpochs().data ?? [];
   const from = useMemo(() => rangeStart(range), [range]);
   const { data, isLoading } = useTime({ from, epochId: epoch ? Number(epoch) : undefined });
-  const [, openTask] = useTaskParam();
+  const openTask = useOpenTask();
 
   const byDay = useMemo(() => {
     const map = new Map<string, number>();

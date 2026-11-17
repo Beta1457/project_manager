@@ -4,7 +4,7 @@ import DOMPurify from 'dompurify';
 import type { Category } from '../types';
 import { PRIORITY_COLORS, contrastText } from '../util';
 import { useColors } from '../hooks';
-import { useTaskParam } from '../taskParam';
+import { useOpenTask } from '../dock/context';
 import { useProject } from '../projectContext';
 
 export function StatusPill({ status, label }: { status: string; label: string }) {
@@ -103,7 +103,7 @@ function linkTaskKeys(html: string, pattern: RegExp | null): string {
 }
 
 export function Markdown({ text }: { text: string }) {
-  const [, openTask] = useTaskParam();
+  const openTask = useOpenTask();
   const { projects } = useProject();
   const pattern = useMemo(() => taskKeyPattern(projects.map((p) => p.key)), [projects]);
   const html = useMemo(() => linkTaskKeys(DOMPurify.sanitize(marked.parse(text, { async: false }), PURIFY), pattern), [text, pattern]);

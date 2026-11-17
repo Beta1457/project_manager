@@ -30,6 +30,7 @@ export type ActionId =
   | 'new-task'
   | 'new-from-template'
   | 'new-doc'
+  | 'import-md'
   | 'upload'
   | 'open'
   | 'toggle'
@@ -314,6 +315,7 @@ export function explorerActions(target: Target, ctx: ActionContext): Node[] {
       action('new-epoch', 'Epoch…', { icon: ICONS.epoch }),
       ...(inFolder ? [action('new-task', 'Task…', { icon: ICONS.task }), ...fromTemplate('Task from template…')] : []),
       action('new-doc', 'Markdown document…', { icon: '📝' }),
+      action('import-md', 'Import Markdown docs…', { icon: '📥' }),
       action('upload', 'Upload files…', { icon: '⬆' }),
     ],
   });

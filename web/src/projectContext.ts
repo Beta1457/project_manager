@@ -6,8 +6,8 @@ import type { Project } from './types';
 export interface ProjectContextValue {
   project: Project;
   projects: Project[];
-  /** Opens another project. `keepTask` keeps the open task (one from that project) on screen. */
-  switchTo: (id: number, opts?: { keepTask?: boolean }) => void;
+  /** Opens another project; `task` (one of that project's) opens in its dock there. */
+  switchTo: (id: number, opts?: { task?: number | string }) => void;
 }
 
 export const ProjectContext = createContext<ProjectContextValue | null>(null);

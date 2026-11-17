@@ -3,15 +3,12 @@ import { NavLink, Outlet } from 'react-router-dom';
 import { api, V1 } from '../api';
 import { useLiveUpdates, useRunningTimer } from '../hooks';
 import { useMutate } from '../mutate';
-import { useTaskParam } from '../taskParam';
-import { contrastText, formatMinutes } from '../util';
+import { contrastText, cx, formatMinutes } from '../util';
 import { ProjectSwitcher } from '../project';
 import { useProject } from '../projectContext';
+import { useDockState, useOpenTask } from '../dock/context';
+import { DockLayer } from '../dock/DockLayer';
 import { QuickAdd } from './QuickAdd';
-import { TaskSheet } from './TaskSheet';
-
-// Lives in its own module so components that Layout renders (TaskSheet, Markdown) can use it without a cycle.
-export { useTaskParam };
 
 const NAV = [
   { to: '/', label: 'Board', ico: '▦', end: true },
@@ -27,11 +24,13 @@ const MOBILE_NAV = ['/', '/list', '/epochs', '/explorer'];
 
 export function Layout() {
   useLiveUpdates(true);
-  const [taskId, setTaskId] = useTaskParam();
+  const openTask = useOpenTask();
   const [adding, setAdding] = useState(false);
+  // Minimized tabs along the bottom: the page leaves room for them.
+  const hasTray = useDockState().items.some((i) => i.kept);
 
   return (
-    <div className="app">
+    <div className={cx('app', hasTray && 'has-tray')}>
       <aside className="sidebar">
         <div className="brand">
           <img src="/icon.svg" width={24} height={24} alt="" /> Project Manager
@@ -62,8 +61,9 @@ export function Layout() {
         </NavLink>
       </nav>
       <button className="fab hide-desktop" onClick={() => setAdding(true)} aria-label="New task">+</button>
-      {adding && <QuickAdd onClose={() => setAdding(false)} onCreated={(id) => setTaskId(id)} />}
-      {taskId !== null && <TaskSheet id={taskId} onClose={() => setTaskId(null)} />}
+      {/* Before QuickAdd, so a dialog opened from the dock's panels shows over them. */}
+      <DockLayer />
+      {adding && <QuickAdd onClose={() => setAdding(false)} onCreated={(id) => openTask(id)} />}
     </div>
   );
 }
@@ -115,7 +115,7 @@ function ProjectChip() {
 function RunningTimerChip() {
   const entry = useRunningTimer().data;
   const mutate = useMutate();
-  const [, setTaskId] = useTaskParam();
+  const openTask = useOpenTask();
   const [, tick] = useState(0);
   useEffect(() => {
     if (!entry) return;
@@ -126,7 +126,7 @@ function RunningTimerChip() {
   const minutes = Math.max(0, Math.round((Date.now() - Date.parse(entry.startedAt)) / 60000));
   return (
     <span className="row nowrap" style={{ gap: 4 }}>
-      <button className="timer-chip" onClick={() => entry.taskId && setTaskId(entry.taskId)} title={entry.taskTitle ?? entry.epochName ?? ''}>
+      <button className="timer-chip" onClick={() => entry.taskId && openTask(entry.taskId)} title={entry.taskTitle ?? entry.epochName ?? ''}>
         <span className="pulse" /> {formatMinutes(minutes)}
         <span className="hide-mobile ellipsis" style={{ maxWidth: 160 }}>{entry.taskKey ?? entry.epochName}</span>
       </button>

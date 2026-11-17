@@ -15,12 +15,51 @@ interface Props {
   confirmClose?: () => boolean | Promise<boolean>;
 }
 
-/** Open sheets, innermost last: only the topmost one reacts to Escape / Tab. */
+/** Open sheets and the dock's panels, innermost last: only the topmost one reacts to Escape / Tab. */
 const openSheets: number[] = [];
 let nextSheetId = 1;
 
-/** Whether a sheet or dialog is open: page-wide shortcuts (Esc, Ctrl+A on the board) leave the keys to it. */
+/** Whether a sheet, dialog or panel is open: page-wide shortcuts (Esc, Ctrl+A on the board) leave the keys to it. */
 export const isSheetOpen = () => openSheets.length > 0;
+
+/**
+ * Puts a layer (a sheet, the dock's panels) on top of the others: until the returned function is called, only
+ * it gets Escape, and Tab cycles inside `root()` instead of wandering onto the page behind.
+ */
+export function openLayer(root: () => HTMLElement | null, onEscape: (e: KeyboardEvent) => void): () => void {
+  const id = nextSheetId++;
+  openSheets.push(id);
+  const onKey = (e: KeyboardEvent) => {
+    if (openSheets[openSheets.length - 1] !== id) return;
+    if (e.key === 'Escape') onEscape(e);
+    else if (e.key === 'Tab') {
+      const el = root();
+      if (el) trapFocus(e, el);
+    }
+  };
+  window.addEventListener('keydown', onKey);
+  return () => {
+    window.removeEventListener('keydown', onKey);
+    openSheets.splice(openSheets.indexOf(id), 1);
+  };
+}
+
+let scrollLocks = 0;
+let overflowBefore = '';
+
+/** Stops the page behind from scrolling until every lock taken has been let go (in any order). */
+export function lockBodyScroll(): () => void {
+  if (scrollLocks++ === 0) {
+    overflowBefore = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+  }
+  let done = false;
+  return () => {
+    if (done) return;
+    done = true;
+    if (--scrollLocks === 0) document.body.style.overflow = overflowBefore;
+  };
+}
 
 /** The side panel's width on desktop, which people can drag (styles.css keeps it 80 px clear of the left edge). */
 const PANEL_WIDTH = { min: 420, max: 1200, initial: 640 };
@@ -75,26 +114,19 @@ export function Sheet({ title, onClose, children, actions, variant = 'side', con
   };
 
   useEffect(() => {
-    const id = nextSheetId++;
-    openSheets.push(id);
     // Focus the dialog itself rather than its first field, so phones don't pop the keyboard open.
     ref.current?.focus({ preventScroll: true });
-    const onKey = (e: KeyboardEvent) => {
-      if (openSheets[openSheets.length - 1] !== id) return;
-      if (e.key === 'Escape') {
+    const closeLayer = openLayer(
+      () => ref.current,
+      (e) => {
         e.preventDefault();
         requestClose.current();
-      } else if (e.key === 'Tab' && ref.current) {
-        trapFocus(e, ref.current);
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
+      },
+    );
+    const unlock = lockBodyScroll();
     return () => {
-      window.removeEventListener('keydown', onKey);
-      openSheets.splice(openSheets.indexOf(id), 1);
-      document.body.style.overflow = prevOverflow;
+      closeLayer();
+      unlock();
       if (opener?.isConnected) opener.focus({ preventScroll: true });
     };
   }, []);

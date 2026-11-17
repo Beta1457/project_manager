@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { api, V1 } from '../api';
+import { useQueryClient } from '@tanstack/react-query';
 import type { FileItem } from '../types';
+import { invalidateKinds } from '../hooks';
+import { byName, failedMessage, uploadFiles } from '../upload';
 import { useToast } from './Toast';
-import { errorMessage } from '../util';
 
 interface Props {
   value: string;
@@ -29,9 +30,11 @@ export function MarkdownEditor({ value, onChange, placeholder, rows = 8, autoFoc
   const fileRef = useRef<HTMLInputElement>(null);
   const valueRef = useRef(value);
   valueRef.current = value;
-  const [uploading, setUploading] = useState(0);
+  // Files dealt with / picked across the uploads running now (several drops can overlap).
+  const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [dragOver, setDragOver] = useState(false);
   const toast = useToast();
+  const qc = useQueryClient();
 
   // When opened for editing, put the cursor at the end so new content/images append.
   useEffect(() => {
@@ -57,35 +60,37 @@ export function MarkdownEditor({ value, onChange, placeholder, rows = 8, autoFoc
     });
   };
 
-  const upload = async (files: File[]) => {
-    if (!files.length) return;
-    setUploading((n) => n + files.length);
-    try {
-      const fd = new FormData();
-      if (folderId != null) fd.append('folderId', String(folderId));
-      else fd.append('purpose', 'attachment');
-      for (const f of files) fd.append('file', f, f.name || `pasted-${Date.now()}.png`);
-      const res = await api.post<{ files: FileItem[] }>(`${V1}/files`, fd);
-      const md = res.files
-        .map((f) => {
-          // SVGs only display as images from the sandboxed render URL; /content serves them as plain text.
-          const isSvg = /\.svg$/i.test(f.name);
-          const url = `/api/v1/files/${f.id}/${isSvg ? 'render' : 'content'}`;
-          const isImage = isSvg || f.mime.startsWith('image/');
-          if (syntax === 'html') {
-            const name = escapeAttr(f.name);
-            return isImage ? `<img src="${url}" alt="${name}">` : `<a href="${url}">${name}</a>`;
-          }
-          const alt = f.name.replace(/[[\]]/g, '');
-          return isImage ? `![${alt}](${url})` : `[${alt}](${url})`;
-        })
-        .join('\n');
-      insertAtCursor(md);
-    } catch (err) {
-      toast(`Upload failed: ${errorMessage(err)}`, 'error');
-    } finally {
-      setUploading((n) => n - files.length);
+  const linkTo = (f: FileItem) => {
+    // SVGs only display as images from the sandboxed render URL; /content serves them as plain text.
+    const isSvg = /\.svg$/i.test(f.name);
+    const url = `/api/v1/files/${f.id}/${isSvg ? 'render' : 'content'}`;
+    const isImage = isSvg || f.mime.startsWith('image/');
+    if (syntax === 'html') {
+      const name = escapeAttr(f.name);
+      return isImage ? `<img src="${url}" alt="${name}">` : `<a href="${url}">${name}</a>`;
     }
+    const alt = f.name.replace(/[[\]]/g, '');
+    return isImage ? `![${alt}](${url})` : `[${alt}](${url})`;
+  };
+
+  /** Any number of files: a few per request, each request's links inserted as it lands, in file-name order. */
+  const upload = async (picked: File[]) => {
+    if (!picked.length) return;
+    const files = byName(picked);
+    setProgress((p) => ({ ...p, total: p.total + files.length }));
+    let counted = 0;
+    const { files: stored, failed } = await uploadFiles(files, folderId != null ? { folderId } : { purpose: 'attachment' }, {
+      stored: (batch) => insertAtCursor(batch.map(linkTo).join('\n')),
+      progress: (done) => {
+        // Worked out here: React may run the updater later, when `counted` has moved on.
+        const step = done - counted;
+        counted = done;
+        setProgress((p) => ({ ...p, done: p.done + step }));
+      },
+    });
+    setProgress((p) => (p.done >= p.total ? { done: 0, total: 0 } : p));
+    if (stored.length) void invalidateKinds(qc, ['files']);
+    if (failed.length) toast(failedMessage(failed, files.length), 'error');
   };
 
   return (
@@ -125,7 +130,11 @@ export function MarkdownEditor({ value, onChange, placeholder, rows = 8, autoFoc
         <button type="button" className="btn btn-sm btn-ghost" onMouseDown={(e) => e.preventDefault()} onClick={() => fileRef.current?.click()}>
           🖼 Add image
         </button>
-        {uploading > 0 && <span className="small muted">Uploading {uploading}…</span>}
+        {progress.total > 0 && (
+          <span className="small muted" role="status">
+            {progress.total === 1 ? 'Uploading…' : `Uploading ${progress.done} of ${progress.total}…`}
+          </span>
+        )}
         <span className="grow" />
         <span className="tiny muted hide-mobile">Drop or paste images here</span>
       </div>

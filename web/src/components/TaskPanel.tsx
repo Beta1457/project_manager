@@ -1,18 +1,18 @@
-import { Fragment, useEffect, useRef, useState, type FormEvent, type MouseEvent } from 'react';
+import { Fragment, memo, useEffect, useRef, useState, type FormEvent, type MouseEvent } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { api, V1 } from '../api';
-import { useColors, useEpochs, useFolders, useMeta, useTask, type TaskRef } from '../hooks';
+import { useColors, useEpochs, useFolders, useMeta, useTask } from '../hooks';
 import { useProject } from '../projectContext';
 import { useToast } from './Toast';
 import { useMutate } from '../mutate';
-import { useTaskParam } from '../taskParam';
+import { useDock, useOpenTask, usePanel } from '../dock/context';
+import { PanelFrame } from '../dock/PanelFrame';
 import type { TaskDetail } from '../types';
 import { clip, contrastText, cx, formatMinutes, joinAnd, plural, subtaskDeleteWords, timeAgo } from '../util';
 import { useUndoableDelete } from '../undoableDelete';
 import { Markdown, Spinner, StatusPill } from './Bits';
 import { askConfirm } from './Confirm';
 import { folderPath } from './Filters';
-import { Sheet } from './Sheet';
 import { TimePanel } from './TimePanel';
 import { MarkdownEditor } from './MarkdownEditor';
 import { TaskSearch } from './TaskSearch';
@@ -20,38 +20,53 @@ import { SaveAsTemplate } from './Templates';
 
 const K = ['tasks'];
 
-export function TaskSheet({ id, onClose }: { id: TaskRef; onClose: () => void }) {
-  const { data: task, error } = useTask(id);
+/** A task in a dock panel (see dock/DockLayer.tsx): what the task sheet was, but it can be minimized or shown beside another. */
+export const TaskPanel = memo(function TaskPanel() {
+  const panel = usePanel();
+  const dock = useDock();
+  const colors = useColors();
+  // A minimized panel doesn't refresh its task (its tab keeps the title it had) until it is shown again.
+  const { data: task, error } = useTask(panel.item.ref, panel.shown || !panel.item.label);
   const { project, projects, switchTo } = useProject();
   const qc = useQueryClient();
   const toast = useToast();
+
+  // The tab in the tray shows the task's key, title and status colour.
+  const statusColor = task ? colors.status(task.status) : undefined;
+  useEffect(() => {
+    if (task) dock.setLabel(panel.key, { id: task.id, code: task.key, title: task.title, color: statusColor });
+  }, [dock, panel.key, task?.id, task?.key, task?.title, statusColor]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // A link or the timer can point at a task in another of your projects: open that project along with it,
-  // so the sheet offers that project's types, categories, epochs and folders.
+  // so the panel offers that project's types, categories, epochs and folders. Its dock opens the task there;
+  // this project's dock lets go of it.
   const elsewhere = task && task.projectId !== project.id ? task.projectId : null;
   useEffect(() => {
-    if (elsewhere === null) return;
+    if (elsewhere === null || !panel.shown || !task) return;
     const other = projects.find((p) => p.id === elsewhere);
     if (!other) {
       void qc.invalidateQueries({ queryKey: ['projects'] }); // created moments ago on another device
       return;
     }
-    switchTo(elsewhere, { keepTask: true });
+    dock.forget(panel.key);
+    switchTo(elsewhere, { task: task.id });
     toast(`Switched to ${other.name}`);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [elsewhere, projects]);
+  }, [elsewhere, projects, panel.shown]);
   const [saving, setSaving] = useState(false);
   return (
     <>
-    <Sheet
-      title={task ? <span><span className="key">{task.key}</span> {task.title}</span> : 'Task'}
-      onClose={onClose}
+    <PanelFrame
+      title={task ? <span><span className="key">{task.key}</span> {task.title}</span> : (panel.item.label?.title ?? 'Task')}
       actions={
         task && (
           <>
-            <button className="btn btn-ghost btn-sm" onClick={() => setSaving(true)} title="Start new tasks from a copy of this one">
-              Save as template
+            <button className="btn btn-ghost btn-sm" onClick={() => setSaving(true)} title="Start new tasks from a copy of this one" aria-label="Save as template">
+              {/* Shorter on phones, where the header also has to fit the task's key beside close and minimize. */}
+              <span className="hide-mobile">Save as template</span>
+              <span className="hide-desktop">Template</span>
             </button>
-            <DeleteButton task={task} onDone={onClose} />
+            <DeleteButton task={task} onDone={panel.close} />
           </>
         )
       }
@@ -64,11 +79,11 @@ export function TaskSheet({ id, onClose }: { id: TaskRef; onClose: () => void })
       ) : (
         <Spinner />
       )}
-    </Sheet>
+    </PanelFrame>
     {saving && task && <SaveAsTemplate task={task} onClose={() => setSaving(false)} />}
     </>
   );
-}
+});
 
 function DeleteButton({ task, onDone }: { task: TaskDetail; onDone: () => void }) {
   const mutate = useMutate();
@@ -130,7 +145,7 @@ function TaskBody({ task }: { task: TaskDetail }) {
   useEffect(() => setTitle(task.title), [task.title]);
 
   const patch = (body: Record<string, unknown>) => mutate(() => api.patch(`${V1}/tasks/${task.id}`, body), K);
-  // Writes from this sheet go out one at a time, in order, so a slow request can't land after a newer one.
+  // Writes from this panel go out one at a time, in order, so a slow request can't land after a newer one.
   const queue = useRef<Promise<unknown>>(Promise.resolve());
   const patchInOrder = <T,>(body: () => Record<string, unknown>, after?: (ok: boolean) => T) =>
     (queue.current = queue.current.then(async () => after?.(Boolean(await patch(body()))))) as Promise<T>;
@@ -141,7 +156,7 @@ function TaskBody({ task }: { task: TaskDetail }) {
     else setTitle(task.title);
   };
 
-  // ---- Description: autosaves ~1s after typing stops, and on Done / closing the sheet. ----
+  // ---- Description: autosaves ~1s after typing stops, and on Done / closing the panel. ----
   // `saved` is the text the server is known to have; the editor is dirty while desc differs from it.
   const saved = useRef(task.description);
   const descRef = useRef(desc);
@@ -167,7 +182,7 @@ function TaskBody({ task }: { task: TaskDetail }) {
     if (descRef.current === saved.current) setDesc(task.description);
     saved.current = task.description;
   }, [task.description]);
-  // Closing the sheet mid-sentence (✕, Escape, back button) still saves.
+  // Closing the panel mid-sentence (✕, Escape, back button) still saves.
   useEffect(
     () => () => {
       if (descRef.current !== saved.current) void flushDesc();
@@ -388,9 +403,9 @@ const LINK_KINDS = [
   { value: 'duplicated_by', label: 'is duplicated by' },
 ];
 
-/** Opens a task in this sheet; Ctrl/Cmd/Shift-click opens it in a new browser tab instead. */
-function useOpenTask() {
-  const [, openTask] = useTaskParam();
+/** Opens a task in this panel (Back returns here); Ctrl/Cmd/Shift-click opens it in a new browser tab instead. */
+function useTaskLink() {
+  const openTask = useOpenTask();
   return (e: MouseEvent, id: number) => {
     if (e.ctrlKey || e.metaKey || e.shiftKey) return; // let the browser open a new tab
     e.preventDefault();
@@ -400,7 +415,7 @@ function useOpenTask() {
 
 /** Which task this one is a sub-task of, and the tasks above that: open them, change the parent, detach. */
 function ParentRow({ task, onPatch }: { task: TaskDetail; onPatch: (body: Record<string, unknown>) => Promise<unknown> }) {
-  const open = useOpenTask();
+  const open = useTaskLink();
   const maxDepth = useMeta().data?.maxSubtaskDepth;
   const [picking, setPicking] = useState(false);
   return (
@@ -464,7 +479,7 @@ function SubtasksSection({ task }: { task: TaskDetail }) {
   const meta = useMeta().data;
   const colors = useColors();
   const epochs = useEpochs().data ?? [];
-  const open = useOpenTask();
+  const open = useTaskLink();
   const [mode, setMode] = useState<'idle' | 'new' | 'existing'>('idle');
   const [title, setTitle] = useState('');
   // New sub-tasks start in the parent's epoch; pick another for work that belongs elsewhere (VFX, SFX...).
@@ -573,7 +588,7 @@ function LinksSection({ task }: { task: TaskDetail }) {
   const links = task.links.filter((l) => !undoable.isHidden(linkUrl(l.task.id)));
   // The tasks holding this one up: it has caught up with them on the board.
   const holdingUp = links.filter((l) => l.blocking && !l.outgoing);
-  const open = useOpenTask();
+  const open = useTaskLink();
   const [adding, setAdding] = useState(false);
   const [kind, setKind] = useState('relates');
   // Only tasks in the same project can be linked, so the search stays in this project.

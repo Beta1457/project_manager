@@ -27,7 +27,8 @@ import { cx } from '../util';
 import { readWidths, storeWidths, useResizeHandle } from '../resize';
 import { BulkBar } from '../components/BulkBar';
 import { FilterBar, useFilters } from '../components/Filters';
-import { PageHeader, useTaskParam } from '../components/Layout';
+import { PageHeader } from '../components/Layout';
+import { useOpenTask } from '../dock/context';
 import { TaskCard } from '../components/TaskCard';
 import { QuickAdd, StatusPicker, type Reorder } from '../components/QuickAdd';
 import { Spinner } from '../components/Bits';
@@ -97,7 +98,7 @@ export function BoardView({ scope = {} }: { scope?: TaskFilters }) {
   const meta = useMeta().data;
   const qc = useQueryClient();
   const mutate = useMutate();
-  const [, openTask] = useTaskParam();
+  const openTask = useOpenTask();
   const [mobileCol, setMobileColState] = useState(readCol);
   const [dragging, setDragging] = useState<Task | null>(null);
   // Whether the dragged card is over the lower half of the card under the pointer (drop goes after it).

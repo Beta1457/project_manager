@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useEpochs, useTree } from '../hooks';
 import { useProject } from '../projectContext';
 import { contrastText, plural } from '../util';
-import { useTaskParam } from '../components/Layout';
+import { useOpenTask } from '../dock/context';
 import { Sheet } from '../components/Sheet';
 import { useToast } from '../components/Toast';
 import { layerColor } from './flow';
@@ -280,7 +280,7 @@ function SizeFields({ node, onChange }: { node: DiagramNode; onChange: (patch: P
 
 function LinkButton({ link }: { link: NonNullable<DiagramNode['link']> }) {
   const navigate = useNavigate();
-  const [, openTask] = useTaskParam();
+  const openTask = useOpenTask();
   const follow = () => {
     if (link.kind === 'task') openTask(link.id);
     else if (link.kind === 'epoch') navigate(`/epochs/${link.id}`);

@@ -4,7 +4,8 @@ import { useTaskSelection } from '../selection';
 import type { Task } from '../types';
 import { BulkBar } from '../components/BulkBar';
 import { FilterBar, useFilters } from '../components/Filters';
-import { PageHeader, useTaskParam } from '../components/Layout';
+import { PageHeader } from '../components/Layout';
+import { useOpenTask } from '../dock/context';
 import { CategoryChip, PriorityBadge, Spinner, StatusPill, TypeBadge } from '../components/Bits';
 import { TaskCard } from '../components/TaskCard';
 import { cx, formatMinutes, timeAgo } from '../util';
@@ -33,7 +34,7 @@ const noop = () => {};
 export function ListPage() {
   const [filters] = useFilters();
   const { data: tasks, isLoading } = useTasks(filters);
-  const [, openTask] = useTaskParam();
+  const openTask = useOpenTask();
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: 'updatedAt', dir: -1 });
 
   const sorted = useMemo(() => [...(tasks ?? [])].sort((a, b) => compare(a, b, sort.key) * sort.dir), [tasks, sort]);

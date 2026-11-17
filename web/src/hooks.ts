@@ -3,7 +3,7 @@ import { useQuery, useQueryClient, type QueryClient } from '@tanstack/react-quer
 import { api, CLIENT_ID, V1, getCurrentProject, lastWriteStartedAt } from './api';
 import { STATUS_COLORS } from './util';
 import { useProjectId } from './projectContext';
-import type { Diagram, DiagramList, Epoch, Folder, Meta, Task, TaskDetail, Template, TimeEntry, Tree, User } from './types';
+import type { Diagram, DiagramList, Epoch, FileItem, Folder, Meta, Task, TaskDetail, Template, TimeEntry, Tree, User } from './types';
 
 export interface TaskFilters {
   q?: string;
@@ -68,12 +68,17 @@ export function useTasks(filters: TaskFilters) {
   });
 }
 
-export const useTask = (ref: TaskRef | null) =>
+/** `enabled: false` keeps what is cached without refreshing it (a minimized panel). */
+export const useTask = (ref: TaskRef | null, enabled = true) =>
   useQuery({
     queryKey: ['task', ref],
     queryFn: () => api.get<TaskDetail>(`${V1}/tasks/${encodeURIComponent(String(ref))}`),
-    enabled: ref !== null,
+    enabled: ref !== null && enabled,
   });
+
+/** A file's details (name, type, size), for a panel showing it. */
+export const useFile = (id: number, enabled = true) =>
+  useQuery({ queryKey: ['file', id], queryFn: () => api.get<FileItem>(`${V1}/files/${id}`), enabled });
 
 export function useEpochs() {
   const pid = useProjectId();
@@ -132,7 +137,7 @@ const INVALIDATE: Record<string, string[]> = {
   tasks: ['tasks', 'task', 'epochs', 'epoch', 'tree', 'time', 'projects'],
   epochs: ['epochs', 'epoch', 'tree', 'tasks', 'task'],
   folders: ['folders', 'tree', 'tasks'],
-  files: ['tree', 'files'],
+  files: ['tree', 'files', 'file'],
   categories: ['meta', 'tasks', 'task'],
   types: ['meta'],
   diagrams: ['diagrams', 'diagram'],

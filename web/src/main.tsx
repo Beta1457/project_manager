@@ -9,6 +9,7 @@ import { ConfirmHost } from './components/Confirm';
 import { Layout, MorePage } from './components/Layout';
 import { Spinner } from './components/Bits';
 import { ProjectProvider } from './project';
+import { DockProvider } from './dock/DockProvider';
 import { LoginPage, returnPath } from './pages/Login';
 import { BoardPage } from './pages/Board';
 import { ListPage } from './pages/List';
@@ -67,7 +68,7 @@ function App() {
   return (
     <Routes>
       <Route path="/login" element={<LoginRoute />} />
-      <Route element={<RequireAuth><ProjectProvider><Layout /></ProjectProvider></RequireAuth>}>
+      <Route element={<RequireAuth><ProjectProvider><DockProvider><Layout /></DockProvider></ProjectProvider></RequireAuth>}>
         <Route index element={<BoardPage />} />
         <Route path="list" element={<ListPage />} />
         <Route path="epochs" element={<EpochsPage />} />

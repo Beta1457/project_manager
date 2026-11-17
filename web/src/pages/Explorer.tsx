@@ -13,14 +13,17 @@ import {
   type DragStartEvent,
 } from '@dnd-kit/core';
 import { api, V1 } from '../api';
-import { useColors, useEpochs, useMeta, useTemplates, useTree } from '../hooks';
+import { useQueryClient } from '@tanstack/react-query';
+import { invalidateKinds, useColors, useEpochs, useMeta, useTemplates, useTree } from '../hooks';
 import { useMutate } from '../mutate';
+import { byName, failedMessage, uploadFiles } from '../upload';
+import { freeName, importMarkdown } from '../importMarkdown';
 import type { FileItem, Tree } from '../types';
 import { cx, errorMessage, formatBytes, formatMinutes, joinAnd, plural, subtaskDeleteWords, tasksBelow } from '../util';
-import { Markdown, Spinner } from '../components/Bits';
-import { MarkdownEditor } from '../components/MarkdownEditor';
+import { Spinner } from '../components/Bits';
 import { folderPath } from '../components/Filters';
-import { PageHeader, useTaskParam } from '../components/Layout';
+import { PageHeader } from '../components/Layout';
+import { useOpenFile, useOpenTask } from '../dock/context';
 import { QuickAdd } from '../components/QuickAdd';
 import { askConfirm, type ConfirmOptions } from '../components/Confirm';
 import { ActionSheet, ContextMenu, type MenuPosition } from '../components/ContextMenu';
@@ -177,19 +180,21 @@ export function ExplorerPage() {
   const colors = useColors();
   const mutate = useMutate();
   const toast = useToast();
+  const qc = useQueryClient();
   const navigate = useNavigate();
-  const [, openTask] = useTaskParam();
+  const openTask = useOpenTask();
+  const openFile = useOpenFile();
   const [expanded, setExpanded] = useState<Set<string>>(loadExpanded);
   /** What a drag carries: the row picked up, and the selection with it when that row is part of it. */
   const [dragging, setDragging] = useState<{ lead: Item; items: Item[] } | null>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [sheetFor, setSheetFor] = useState<Target | null>(null);
   const [moving, setMoving] = useState<Item[] | null>(null);
-  const [preview, setPreview] = useState<{ file: FileItem; edit: boolean; hash?: string } | null>(null);
   const [newTask, setNewTask] = useState<NewTask | null>(null);
   const [newEpochIn, setNewEpochIn] = useState<{ folderId: number | null } | null>(null);
   const [savedClip, setSavedClip] = useState<Clip | null>(() => loadClip(project.id));
   const uploadRef = useRef<HTMLInputElement>(null);
+  const importRef = useRef<HTMLInputElement>(null);
   const [uploadTarget, setUploadTarget] = useState<number | null>(null);
   const menuSeq = useRef(0);
   const lastPointer = useRef('mouse');
@@ -299,13 +304,52 @@ export function ExplorerPage() {
     }
   };
 
-  const upload = async (files: FileList | null, folderId: number | null) => {
-    if (!files?.length) return;
-    const fd = new FormData();
-    if (folderId !== null) fd.append('folderId', String(folderId));
-    for (const f of Array.from(files)) fd.append('file', f, f.name);
-    await mutate(() => api.post(`${V1}/files`, fd), ['files'], `Uploaded ${files.length} file(s)`);
+  /** Any number of files, a few per request (the server takes 20 at most), in file-name order. */
+  const upload = async (list: FileList | null, folderId: number | null) => {
+    const files = list ? byName(Array.from(list)) : [];
+    if (!files.length) return;
     if (folderId !== null) expand(`folder-${folderId}`);
+    if (files.length > 10) toast(`Uploading ${plural(files.length, 'file')}…`);
+    const { files: stored, failed } = await uploadFiles(files, { folderId });
+    if (stored.length) {
+      void invalidateKinds(qc, ['files']);
+      toast(`Uploaded ${plural(stored.length, 'file')}`);
+    }
+    if (failed.length) toast(failedMessage(failed, files.length), 'error');
+  };
+
+  /** Markdown files become documents; images written inside them (Google Docs' Markdown download) become files. */
+  const importDocs = async (list: FileList | null, folderId: number | null) => {
+    const files = list ? byName(Array.from(list)) : [];
+    if (!files.length) return;
+    if (folderId !== null) expand(`folder-${folderId}`);
+    toast(files.length === 1 ? `Importing “${files[0].name}”…` : `Importing ${plural(files.length, 'document')}…`);
+    // Names already used where they go, so nothing ends up with a twin.
+    const takenFiles = new Set((tree?.files ?? []).filter((f) => f.folderId === folderId).map((f) => f.name.toLowerCase()));
+    const takenFolders = new Set((tree?.folders ?? []).filter((f) => f.parentId === folderId).map((f) => f.name.toLowerCase()));
+    const imported: FileItem[] = [];
+    let images = 0;
+    const problems: string[] = [];
+    for (const file of files) {
+      const ext = /\.markdown$/i.test(file.name) ? '.markdown' : '.md';
+      const doc = freeName(file.name.replace(/\.(md|markdown)$/i, '') + ext, takenFiles, ext);
+      const imagesFolder = freeName(`${doc.slice(0, -ext.length)} images`, takenFolders);
+      try {
+        const r = await importMarkdown(file, folderId, { doc, imagesFolder });
+        imported.push(r.doc);
+        images += r.images;
+        if (r.failed.length) problems.push(`${file.name}: ${failedMessage(r.failed, r.images + r.failed.length)}`);
+      } catch (err) {
+        problems.push(`${file.name}: ${errorMessage(err)}`);
+      }
+    }
+    void invalidateKinds(qc, ['files', 'folders']);
+    if (imported.length) {
+      const what = imported.length === 1 ? `“${imported[0].name}”` : plural(imported.length, 'document');
+      toast(`Imported ${what}${images ? ` with ${plural(images, 'image')}` : ''}`);
+    }
+    if (problems.length) toast(problems.join(' · '), 'error');
+    if (imported.length === 1 && files.length === 1) openFile(imported[0]);
   };
 
   const createDoc = async (folderId: number | null) => {
@@ -314,7 +358,7 @@ export function ExplorerPage() {
     try {
       const file = await api.post<FileItem>(`${V1}/docs`, { name: name.trim(), folderId, content: '' });
       if (folderId !== null) expand(`folder-${folderId}`);
-      setPreview({ file, edit: true });
+      openFile(file, { edit: true });
     } catch (err) {
       toast(errorMessage(err), 'error');
     }
@@ -374,7 +418,7 @@ export function ExplorerPage() {
     else if (item.kind === 'epoch') navigate(`/epochs/${item.id}`);
     else if (item.kind === 'file') {
       const file = tree.files.find((f) => f.id === item.id);
-      setPreview(file ? { file, edit: false } : null);
+      if (file) openFile(file);
     }
     else toggle(`folder-${item.id}`);
   };
@@ -611,9 +655,10 @@ export function ExplorerPage() {
       case 'new-doc':
         return void createDoc(folderId);
       case 'upload':
+      case 'import-md':
         // Straight away: browsers only open the file picker during the click or key press.
         setUploadTarget(folderId);
-        uploadRef.current?.click();
+        (id === 'upload' ? uploadRef : importRef).current?.click();
         return;
       case 'paste':
         return void paste(target, fromKeyboard);
@@ -650,7 +695,7 @@ export function ExplorerPage() {
       }
       case 'edit': {
         const file = tree.files.find((f) => f.id === item.id);
-        if (file) setPreview({ file, edit: true });
+        if (file) openFile(file, { edit: true });
         return;
       }
       case 'download':
@@ -836,6 +881,8 @@ export function ExplorerPage() {
       </div>
 
       <input ref={uploadRef} type="file" multiple hidden onChange={(e) => { void upload(e.target.files, uploadTarget); e.target.value = ''; }} />
+      <input ref={importRef} type="file" multiple hidden accept=".md,.markdown"
+        onChange={(e) => { void importDocs(e.target.files, uploadTarget); e.target.value = ''; }} />
 
       {menu && (
         <ContextMenu
@@ -862,20 +909,6 @@ export function ExplorerPage() {
       {moving && (
         <MoveDialog items={moving} tree={tree} onClose={() => setMoving(null)}
           onPick={(dest) => { void (moving.length > 1 ? moveItems(moving, dest) : moveItem(moving[0], dest)); setMoving(null); }} />
-      )}
-      {preview && (
-        <FilePreview
-          key={preview.file.id}
-          file={preview.file}
-          hash={preview.hash}
-          startEditing={preview.edit}
-          onClose={() => setPreview(null)}
-          onOpenFile={(id, hash) => {
-            const file = tree.files.find((f) => f.id === id);
-            if (file) setPreview({ file, edit: false, hash });
-            else toast('That page is not in the explorer any more', 'error');
-          }}
-        />
       )}
       {newTask && <QuickAdd onClose={() => setNewTask(null)} defaults={newTask} onCreated={openTask} />}
       {newEpochIn && <EpochForm epoch={null} folderId={newEpochIn.folderId} onClose={() => setNewEpochIn(null)} />}
@@ -1049,169 +1082,6 @@ function MoveDialog({ items, tree, onClose, onPick }: { items: Item[]; tree: Tre
             <span style={{ color: e.color }}>◆</span> {e.name}
           </button>
         ))}
-      </div>
-    </Sheet>
-  );
-}
-
-interface FilePreviewProps {
-  file: FileItem;
-  onClose: () => void;
-  startEditing?: boolean;
-  /** Fragment to scroll an HTML preview to ("#install"). */
-  hash?: string;
-  /** A link in an HTML preview pointed at another uploaded page. */
-  onOpenFile?: (id: number, hash: string) => void;
-}
-
-function FilePreview({ file, onClose, startEditing = false, hash = '', onOpenFile }: FilePreviewProps) {
-  const url = `/api/v1/files/${file.id}/content`;
-  const isImage = /^image\/(png|jpe?g|gif|webp|bmp|avif)$/.test(file.mime);
-  const isPdf = file.mime === 'application/pdf';
-  const isMedia = /^(audio|video)\//.test(file.mime);
-  const isMarkdown = /\.(md|markdown)$/i.test(file.name);
-  const isHtml = /\.html?$/i.test(file.name);
-  const isSvg = /\.svg$/i.test(file.name);
-  // HTML/SVG previews come from a sandboxed endpoint: scripts in the file can't reach the app or your login.
-  const renderUrl = `/api/v1/files/${file.id}/render`;
-  const [view, setView] = useState<'preview' | 'source'>('preview');
-  const [frameVersion, setFrameVersion] = useState(0);
-  const [text, setText] = useState<string | null>(null);
-  const [isText, setIsText] = useState(false);
-  const [editing, setEditing] = useState(startEditing);
-  const [draft, setDraft] = useState('');
-  const [saveState, setSaveState] = useState<'saved' | 'pending' | 'saving' | 'error'>('saved');
-  const toast = useToast();
-  const lastSaved = useRef<string | null>(null);
-  const frameRef = useRef<HTMLIFrameElement>(null);
-
-  // Links between uploaded pages: the sandboxed page asks us to open the target (see PAGE_NAV_SCRIPT on the server).
-  // Only messages from our own preview frame count, and they can only ask to show another file in this preview.
-  useEffect(() => {
-    if (!onOpenFile) return;
-    const onMessage = (e: MessageEvent) => {
-      if (!frameRef.current || e.source !== frameRef.current.contentWindow) return;
-      const d = e.data as { type?: unknown; id?: unknown; hash?: unknown } | null;
-      if (d?.type !== 'pm-open-file' || typeof d.id !== 'number' || !Number.isInteger(d.id)) return;
-      onOpenFile(d.id, typeof d.hash === 'string' && d.hash.startsWith('#') ? d.hash : '');
-    };
-    window.addEventListener('message', onMessage);
-    return () => window.removeEventListener('message', onMessage);
-  }, [onOpenFile]);
-
-  useEffect(() => {
-    if (isImage || isPdf || isMedia || file.size > 2 * 1024 * 1024) return;
-    let cancelled = false;
-    fetch(url, { cache: 'no-store' }).then(async (r) => {
-      if (!cancelled && r.headers.get('content-type')?.startsWith('text/plain')) {
-        const body = await r.text();
-        setIsText(true);
-        setText(body);
-        setDraft(body);
-        lastSaved.current = body;
-      }
-    }).catch(() => {});
-    return () => { cancelled = true; };
-  }, [url, isImage, isPdf, isMedia, file.size]);
-
-  const save = async (content: string) => {
-    setSaveState('saving');
-    try {
-      await api.put(`${V1}/files/${file.id}/content`, { content });
-      lastSaved.current = content;
-      setText(content);
-      setSaveState('saved');
-      setFrameVersion((v) => v + 1); // reload the HTML/SVG preview with the saved content
-    } catch (err) {
-      setSaveState('error');
-      toast(errorMessage(err), 'error');
-    }
-  };
-
-  // Autosave while editing.
-  useEffect(() => {
-    if (!editing || lastSaved.current === null || draft === lastSaved.current) return;
-    setSaveState('pending');
-    const t = window.setTimeout(() => void save(draft), 800);
-    return () => window.clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [draft, editing]);
-
-  const finishEditing = async () => {
-    if (lastSaved.current !== null && draft !== lastSaved.current) await save(draft);
-    setEditing(false);
-  };
-
-  const close = () => {
-    if (editing && lastSaved.current !== null && draft !== lastSaved.current) void save(draft);
-    onClose();
-  };
-
-  return (
-    <Sheet
-      title={file.name}
-      onClose={close}
-      actions={
-        <>
-          {isText && (editing ? (
-            <>
-              <span className="tiny muted">{saveState === 'saved' ? 'Saved' : saveState === 'error' ? 'Not saved' : 'Saving…'}</span>
-              <button className="btn btn-sm btn-primary" onClick={finishEditing}>Done</button>
-            </>
-          ) : (
-            <button className="btn btn-sm" onClick={() => setEditing(true)}>Edit</button>
-          ))}
-          <a className="btn btn-sm" href={`${url}?download=1`}>⬇</a>
-        </>
-      }
-    >
-      <div className="stack">
-        <div className="small muted">{file.mime} · {formatBytes(file.size)}</div>
-        {isImage && <img src={url} alt={file.name} style={{ maxWidth: '100%', borderRadius: 8 }} />}
-        {isPdf && <a className="btn" href={url} target="_blank" rel="noreferrer">Open PDF</a>}
-        {file.mime.startsWith('audio/') && <audio controls src={url} style={{ width: '100%' }} />}
-        {file.mime.startsWith('video/') && <video controls src={url} style={{ width: '100%' }} />}
-        {isText && editing && (
-          <MarkdownEditor
-            value={draft}
-            onChange={setDraft}
-            rows={18}
-            folderId={file.folderId}
-            autoFocus
-            minHeight={320}
-            syntax={isHtml || isSvg ? 'html' : 'markdown'}
-            placeholder={isHtml ? 'HTML. Drag, paste or add images.' : undefined}
-          />
-        )}
-        {(isHtml || isSvg) && !editing && (
-          <div className="row" style={{ justifyContent: 'space-between' }}>
-            <div className="tabs" style={{ margin: 0 }}>
-              <button className={view === 'preview' ? 'on' : ''} onClick={() => setView('preview')}>Preview</button>
-              <button className={view === 'source' ? 'on' : ''} onClick={() => setView('source')}>Source</button>
-            </div>
-            <a className="btn btn-sm" href={renderUrl} target="_blank" rel="noopener noreferrer">Open full page ↗</a>
-          </div>
-        )}
-        {isHtml && !editing && view === 'preview' && (
-          <iframe
-            key={frameVersion}
-            ref={frameRef}
-            className="html-frame"
-            src={renderUrl + hash}
-            title={`Preview of ${file.name}`}
-            // No allow-same-origin: the page runs isolated from the app (the server's CSP enforces the same).
-            sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"
-          />
-        )}
-        {isSvg && !editing && view === 'preview' && (
-          <img key={frameVersion} className="svg-preview" src={renderUrl} alt={file.name} />
-        )}
-        {isText && !editing && (!(isHtml || isSvg) || view === 'source') && (isMarkdown ? (
-          <div className="card panel">{text ? <Markdown text={text} /> : <span className="muted">Empty document. Tap Edit to write.</span>}</div>
-        ) : (
-          <pre className="card panel" style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: '0.85rem', margin: 0 }}>{text}</pre>
-        ))}
-        {!isImage && !isPdf && !isMedia && !isText && <div className="muted">No preview available — use Download.</div>}
       </div>
     </Sheet>
   );
