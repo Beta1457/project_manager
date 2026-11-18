@@ -28,6 +28,7 @@ import { QuickAdd } from '../components/QuickAdd';
 import { askConfirm, type ConfirmOptions } from '../components/Confirm';
 import { ActionSheet, ContextMenu, type MenuPosition } from '../components/ContextMenu';
 import { Sheet, isSheetOpen } from '../components/Sheet';
+import { FolderColorDialog, FolderIcon } from '../explorer/folderColors';
 import { useToast } from '../components/Toast';
 import { useProject } from '../projectContext';
 import { useSelection, type Selection } from '../selection';
@@ -190,6 +191,8 @@ export function ExplorerPage() {
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [sheetFor, setSheetFor] = useState<Target | null>(null);
   const [moving, setMoving] = useState<Item[] | null>(null);
+  /** Folders whose colour is being picked. */
+  const [coloring, setColoring] = useState<Item[] | null>(null);
   const [newTask, setNewTask] = useState<NewTask | null>(null);
   const [newEpochIn, setNewEpochIn] = useState<{ folderId: number | null } | null>(null);
   const [savedClip, setSavedClip] = useState<Clip | null>(() => loadClip(project.id));
@@ -229,6 +232,7 @@ export function ExplorerPage() {
   const lookups = useMemo(
     () =>
       tree && {
+        folders: new Map(tree.folders.map((f) => [f.id, f])),
         epochs: new Map(tree.epochs.map((e) => [e.id, e])),
         tasks: new Map(tree.tasks.map((t) => [t.id, t])),
         files: new Map(tree.files.map((f) => [f.id, f])),
@@ -372,6 +376,10 @@ export function ExplorerPage() {
   };
 
   if (isLoading || !tree || !lookups) return <><PageHeader title="Explorer" /><Spinner /></>;
+
+  /** Gives folders a colour (null: the default look), all in one request. */
+  const colorFolders = (items: Item[], color: string | null) =>
+    mutate(() => api.post(`${V1}/explorer/color`, { items: refs(items), color }), ['folders']);
 
   /** Moves several items in one request, all or nothing. Opens the destination first, so they stay in view (and selected). */
   const moveItems = async (items: Item[], dest: Dest) => {
@@ -522,7 +530,7 @@ export function ExplorerPage() {
         <ul className="confirm-list">
           {items.slice(0, 10).map((i) => (
             <li key={keyOf(i)}>
-              {ICONS[i.kind]} {i.name}
+              {i.kind === 'folder' ? <FolderIcon color={lookups.folders.get(i.id)?.color} /> : ICONS[i.kind]} {i.name}
             </li>
           ))}
           {n > 10 && <li className="muted">and {n - 10} more</li>}
@@ -674,6 +682,10 @@ export function ExplorerPage() {
         return void copyItems(items, null, 'Duplicate');
       case 'move':
         return setMoving(items);
+      case 'color': {
+        const folders = items.filter((i) => i.kind === 'folder');
+        return void (folders.length && setColoring(folders));
+      }
       case 'delete':
         return void removeItems(items);
       case 'clear-selection':
@@ -784,7 +796,10 @@ export function ExplorerPage() {
     const props = { item, depth, events, dragging: draggingKeys, cut: isCut(item), selected: selection.has(key) };
     switch (item.kind) {
       case 'folder':
-        return <Row key={key} {...props} twisty={row.open ? '▾' : '▸'} onTwisty={() => toggle(key)} droppableId={`drop-folder-${item.id}`} />;
+        return (
+          <Row key={key} {...props} twisty={row.open ? '▾' : '▸'} onTwisty={() => toggle(key)} droppableId={`drop-folder-${item.id}`}
+            icon={<FolderIcon color={lookups.folders.get(item.id)?.color} />} />
+        );
       case 'epoch': {
         const e = lookups.epochs.get(item.id);
         return (
@@ -867,7 +882,9 @@ export function ExplorerPage() {
               {dragging && (
                 <div className={cx('drag-stack tree-drag', dragging.items.length > 1 && 'many')}>
                   <div className="tree-row card drag-overlay">
-                    <span className="ico">{ICONS[dragging.lead.kind]}</span>
+                    <span className="ico">
+                      {dragging.lead.kind === 'folder' ? <FolderIcon color={lookups.folders.get(dragging.lead.id)?.color} /> : ICONS[dragging.lead.kind]}
+                    </span>
                     <span className="name">{dragging.lead.name}</span>
                   </div>
                   {dragging.items.length > 1 && <span className="drag-count" aria-hidden>+{dragging.items.length - 1}</span>}
@@ -910,6 +927,16 @@ export function ExplorerPage() {
         <MoveDialog items={moving} tree={tree} onClose={() => setMoving(null)}
           onPick={(dest) => { void (moving.length > 1 ? moveItems(moving, dest) : moveItem(moving[0], dest)); setMoving(null); }} />
       )}
+      {coloring && (
+        <FolderColorDialog
+          folders={coloring.map((f) => ({ id: f.id, name: f.name, color: lookups.folders.get(f.id)?.color ?? null }))}
+          onClose={() => setColoring(null)}
+          onPick={(color) => {
+            void colorFolders(coloring, color);
+            setColoring(null);
+          }}
+        />
+      )}
       {newTask && <QuickAdd onClose={() => setNewTask(null)} defaults={newTask} onCreated={openTask} />}
       {newEpochIn && <EpochForm epoch={null} folderId={newEpochIn.folderId} onClose={() => setNewEpochIn(null)} />}
     </>
@@ -949,6 +976,7 @@ function SelectionBar({ selection, items, total, onAction }: {
         {button('cut', 'Cut')}
         {button('copy', 'Copy')}
         {button('duplicate', 'Duplicate')}
+        {items.some((i) => i.kind === 'folder') && button('color', 'Colour…')}
         {button('delete', 'Delete', 'btn-danger')}
       </div>
     </div>
@@ -1063,7 +1091,7 @@ function MoveDialog({ items, tree, onClose, onPick }: { items: Item[]; tree: Tre
     for (const i of items) if (i.kind === 'folder') walk(i.id);
     return set;
   }, [items, tree.folders]);
-  const folders = tree.folders.filter((f) => !blocked.has(f.id)).map((f) => ({ id: f.id, path: folderPath(tree.folders, f.id) }))
+  const folders = tree.folders.filter((f) => !blocked.has(f.id)).map((f) => ({ id: f.id, path: folderPath(tree.folders, f.id), color: f.color }))
     .sort((a, b) => a.path.localeCompare(b.path));
   const tasksOnly = items.every((i) => i.kind === 'task');
   const someTasks = items.some((i) => i.kind === 'task');
@@ -1074,7 +1102,9 @@ function MoveDialog({ items, tree, onClose, onPick }: { items: Item[]; tree: Tre
           {tasksOnly ? '📥 Inbox (unfiled)' : someTasks ? '🏠 Root (tasks go to the Inbox)' : '🏠 Root'}
         </button>
         {folders.map((f) => (
-          <button key={f.id} className="btn" style={{ justifyContent: 'flex-start' }} onClick={() => onPick({ folderId: f.id })}>📁 {f.path}</button>
+          <button key={f.id} className="btn" style={{ justifyContent: 'flex-start' }} onClick={() => onPick({ folderId: f.id })}>
+            <FolderIcon color={f.color} /> {f.path}
+          </button>
         ))}
         {tasksOnly && tree.epochs.length > 0 && <div className="section-title">Epochs</div>}
         {tasksOnly && tree.epochs.map((e) => (

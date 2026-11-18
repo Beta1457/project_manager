@@ -250,6 +250,10 @@ const MIGRATIONS: string[] = [
     UNIQUE (project_id, name)
   );
   `,
+  // v8: folder colours, for the Explorer ("#rrggbb"). NULL is the plain folder look.
+  `
+  ALTER TABLE folders ADD COLUMN color TEXT;
+  `,
 ];
 
 /** Gives the data from before projects existed to the first user, as a project with the key "T". */

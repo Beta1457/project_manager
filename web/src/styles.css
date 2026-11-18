@@ -15,6 +15,8 @@
   --nav-h: 60px;
   --header-h: 52px;
   --safe-bottom: env(safe-area-inset-bottom, 0px);
+  /* Around folder icons, so every folder colour shows on the page: white ones here, near-black ones when dark. */
+  --folder-edge: rgb(15 23 42 / 0.32);
   color-scheme: light;
 }
 
@@ -30,6 +32,7 @@
     --primary-soft: #1e1b4b;
     --shadow: 0 1px 2px rgb(0 0 0 / 0.4);
     --shadow-lg: 0 10px 30px rgb(0 0 0 / 0.5);
+    --folder-edge: rgb(255 255 255 / 0.38);
     color-scheme: dark;
   }
 }
@@ -463,6 +466,19 @@ html.dock-dragging, html.dock-dragging * { cursor: grabbing !important; user-sel
 .tree-row.dragging { opacity: 0.4; }
 .tree-row .twisty { width: 20px; text-align: center; color: var(--muted); flex: none; }
 .tree-row .ico { width: 22px; text-align: center; flex: none; }
+/* Folders (explorer/folderColors.tsx): in the colour picked for each, or the default amber (DEFAULT_FOLDER_COLOR). */
+.folder-icon { display: inline-block; width: 1.25em; height: 1em; vertical-align: -0.15em; flex: none; overflow: visible; }
+.folder-icon path { stroke: var(--folder-edge); stroke-width: 1px; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
+.folder-back { fill: color-mix(in srgb, var(--folder, #fbb954) 68%, #000); }
+.folder-front { fill: var(--folder, #fbb954); }
+.folder-color-preview { display: flex; align-items: center; gap: 10px; min-width: 0; font-weight: 600; font-size: 1.05rem; }
+.folder-color-preview .folder-icon { font-size: 1.6rem; }
+.folder-color-icons { display: inline-flex; gap: 4px; flex: none; }
+.folder-colors { display: grid; grid-template-columns: repeat(8, minmax(28px, 1fr)); gap: 6px; }
+.folder-swatch { aspect-ratio: 1; padding: 0; border: 1px solid var(--folder-edge); border-radius: 8px; cursor: pointer; transition: transform 0.08s; }
+.folder-swatch:hover { transform: scale(1.1); }
+.folder-swatch:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.folder-swatch.on { box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--text); }
 .tree-row .name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tree-row .more { opacity: 0.7; }
 .drag-handle { cursor: grab; color: var(--muted); padding: 0 4px; touch-action: none; font-size: 1.1rem; }

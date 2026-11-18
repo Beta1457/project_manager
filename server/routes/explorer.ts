@@ -4,16 +4,18 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { AppContext } from '../context.ts';
 import type { ProjectTable } from '../access.ts';
 import type { DB } from '../db.ts';
-import { tx } from '../db.ts';
+import { nowIso, tx } from '../db.ts';
 import type { ChangeKind } from '../events.ts';
 import { requireAuth } from '../auth.ts';
 import { badRequest, conflict } from '../lib/errors.ts';
+import { assertColor } from '../lib/util.ts';
 import { deleteFileRow, moveFile } from './files.ts';
 import { deleteEpoch, deleteFolder, directTimeEntries, isDescendant, moveEpoch, moveFolder } from './structure.ts';
 import { deleteTasks, updateTask } from './tasks.ts';
 
 /**
- * Several Explorer items at once, of any kinds (folders, epochs, tasks and files): move them or delete them.
+ * Several Explorer items at once, of any kinds (folders, epochs, tasks and files): move them or delete them, or
+ * give folders a colour.
  * All or nothing: every item and the destination are checked before anything changes, and the changes run in
  * one transaction, so a refused or failed request changes nothing. Copying several at once is
  * POST /api/v1/copy with "items" (copy.ts), which shares the helpers here.
@@ -140,6 +142,12 @@ interface MoveBody {
   to: { folderId?: number | null; epochId?: number };
 }
 
+interface ColorBody {
+  items: ItemRef[];
+  /** "#RRGGBB", or null for the plain folder look. */
+  color: string | null;
+}
+
 interface DeleteBody {
   items: ItemRef[];
   /** Also delete the sub-tasks of the tasks deleted (else those become top-level tasks). */
@@ -203,6 +211,34 @@ export function registerExplorerRoutes(app: FastifyInstance, ctx: AppContext): v
       });
       emit(moving.map((i) => EVENT[i.kind]), actor, pid);
       return { ok: true, moved: moving.length };
+    },
+  );
+
+  // Gives folders a colour, or the plain look again (null). Only folders have one; what is inside them keeps its own.
+  app.post<{ Body: ColorBody }>(
+    '/api/v1/explorer/color',
+    {
+      schema: {
+        body: {
+          type: 'object',
+          required: ['items', 'color'],
+          properties: { items: itemsSchema, color: { type: ['string', 'null'], maxLength: 7 } },
+        },
+      },
+    },
+    async (req) => {
+      const { actor } = requireAuth(req);
+      const color = req.body.color ? assertColor(req.body.color) : null;
+      const { pid, items } = resolveItems(req, ctx, req.body.items);
+      const others = items.filter((i) => i.kind !== 'folder');
+      if (others.length) throw badRequest(`Only folders have a colour: ${names(others)} ${others.length === 1 ? "isn't a folder" : "aren't folders"}`);
+      const set = db.prepare('UPDATE folders SET color = ?, updated_at = ? WHERE id = ?');
+      const now = nowIso();
+      tx(db, () => {
+        for (const f of items) set.run(color, now, f.id);
+      });
+      emit(['folders'], actor, pid);
+      return { ok: true, colored: items.length };
     },
   );
 

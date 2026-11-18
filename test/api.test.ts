@@ -1749,6 +1749,59 @@ test('explorer: delete several items of any kind at once; folders and epochs kee
   assert.equal((await del([])).status, 400);
 });
 
+test('folder colours: set when made or later, cleared, several at once, and kept by copies', async () => {
+  const folder = (body: Json) => call('POST', '/api/v1/folders', body);
+  const colorOf = async (id: number) => (await call('GET', '/api/v1/tree')).body.folders.find((f: Json) => f.id === id)?.color;
+
+  // Made plain or with a colour, which is stored in lower case.
+  const plain = (await folder({ name: 'Col plain' })).body;
+  assert.equal(plain.color, null);
+  const red = await folder({ name: 'Col red', color: '#E83B3B' });
+  assert.equal(red.status, 201);
+  assert.equal(red.body.color, '#e83b3b');
+  assert.equal((await folder({ name: 'Col bad', color: 'red' })).status, 400);
+
+  // Changed and cleared one at a time; a rename leaves the colour alone; a refused change changes nothing.
+  assert.equal((await call('PATCH', `/api/v1/folders/${plain.id}`, { color: '#4d9be6' })).body.color, '#4d9be6');
+  assert.equal((await call('PATCH', `/api/v1/folders/${plain.id}`, { name: 'Col renamed' })).body.color, '#4d9be6');
+  assert.equal((await call('PATCH', `/api/v1/folders/${plain.id}`, { name: 'Col again', color: '#nothex' })).status, 400);
+  assert.equal(await colorOf(plain.id), '#4d9be6');
+  assert.equal((await call('GET', '/api/v1/folders')).body.folders.find((f: Json) => f.id === plain.id).name, 'Col renamed');
+  assert.equal((await call('PATCH', `/api/v1/folders/${plain.id}`, { color: null })).body.color, null);
+
+  // Several at once, as one change; only folders have a colour; all or nothing.
+  const color = (items: Json[], c: string | null, auth: 'session' | 'token' = 'session') =>
+    call('POST', '/api/v1/explorer/color', { items, color: c }, auth);
+  const seen: string[] = [];
+  const off = ctx.bus.subscribe((e) => seen.push(e.kind));
+  const both = await color([{ kind: 'folder', id: plain.id }, { kind: 'folder', id: red.body.id }], '#1EBC73', 'token');
+  off();
+  assert.equal(both.status, 200, JSON.stringify(both.body));
+  assert.equal(both.body.colored, 2);
+  assert.deepEqual(seen, ['folders']);
+  assert.deepEqual([await colorOf(plain.id), await colorOf(red.body.id)], ['#1ebc73', '#1ebc73']);
+  const epoch = (await call('POST', '/api/v1/epochs', { name: 'Col epoch' })).body;
+  const notFolder = await color([{ kind: 'folder', id: plain.id }, { kind: 'epoch', id: epoch.id }], '#ffffff');
+  assert.equal(notFolder.status, 400);
+  assert.match(notFolder.body.error, /Only folders have a colour: "Col epoch" isn't a folder/);
+  assert.equal((await color([{ kind: 'folder', id: plain.id }, { kind: 'folder', id: 999999 }], null)).status, 404);
+  assert.equal((await color([{ kind: 'folder', id: plain.id }], 'blue')).status, 400);
+  assert.equal((await color([], null)).status, 400);
+  assert.equal(await colorOf(plain.id), '#1ebc73', 'refused requests change nothing');
+  assert.equal((await color([{ kind: 'folder', id: plain.id }], null)).body.colored, 1);
+  assert.equal(await colorOf(plain.id), null);
+
+  // A copy of a folder keeps its colour, and so do the folders inside it.
+  const inner = (await folder({ name: 'Col inner', parentId: red.body.id, color: '#905ea9' })).body;
+  const copied = await call('POST', '/api/v1/copy', { item: { kind: 'folder', id: red.body.id }, to: { folderId: null } });
+  assert.equal(copied.status, 201, JSON.stringify(copied.body));
+  const t = (await call('GET', '/api/v1/tree')).body;
+  const copyTop = t.folders.find((f: Json) => f.id === copied.body.item.id);
+  const copyInner = t.folders.find((f: Json) => f.parentId === copyTop.id);
+  assert.deepEqual([copyTop.color, copyInner.color], ['#1ebc73', '#905ea9']);
+  assert.notEqual(copyInner.id, inner.id);
+});
+
 test('copy: several items at once, each copied once, and duplicates next to their originals', async () => {
   const copy = (body: Json) => call('POST', '/api/v1/copy', body);
   const folder = async (name: string, parentId: number | null = null) => (await call('POST', '/api/v1/folders', { name, parentId })).body;

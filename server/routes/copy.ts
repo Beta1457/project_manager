@@ -46,7 +46,7 @@ interface CopyBody {
   dryRun?: boolean;
 }
 
-interface FolderRow { id: number; parent_id: number | null; name: string; sort_order: number }
+interface FolderRow { id: number; parent_id: number | null; name: string; sort_order: number; color: string | null }
 interface EpochRow {
   id: number; folder_id: number | null; name: string; description: string; color: string;
   target_date: string | null; estimate_minutes: number | null; sort_order: number;
@@ -104,12 +104,12 @@ function collect(db: DB, pid: number, items: ItemRef[]): Plan {
 
   for (const item of items) {
     if (item.kind === 'folder') {
-      const queue = [db.prepare('SELECT id, parent_id, name, sort_order FROM folders WHERE id = ?').get(item.id) as unknown as FolderRow];
+      const queue = [db.prepare('SELECT id, parent_id, name, sort_order, color FROM folders WHERE id = ?').get(item.id) as unknown as FolderRow];
       while (queue.length) {
         const f = queue.shift()!;
         plan.folders.push(f);
         queue.push(
-          ...(db.prepare('SELECT id, parent_id, name, sort_order FROM folders WHERE project_id = ? AND parent_id = ? ORDER BY sort_order, id').all(pid, f.id) as unknown as FolderRow[]),
+          ...(db.prepare('SELECT id, parent_id, name, sort_order, color FROM folders WHERE project_id = ? AND parent_id = ? ORDER BY sort_order, id').all(pid, f.id) as unknown as FolderRow[]),
         );
         for (const e of epochsIn(f.id)) {
           plan.epochs.push(e);
@@ -304,8 +304,8 @@ export function registerCopyRoutes(app: FastifyInstance, ctx: AppContext): void 
               ? freeName(f.name, (n) => !!db.prepare('SELECT 1 FROM folders WHERE project_id = ? AND parent_id IS ? AND name = ? COLLATE NOCASE').get(pid, parent, n), 200)
               : f.name;
             const res = db
-              .prepare('INSERT INTO folders (project_id, name, parent_id, sort_order) VALUES (?, ?, ?, ?)')
-              .run(pid, name, parent, first ? nextOrder('folders', 'parent_id', parent) : f.sort_order);
+              .prepare('INSERT INTO folders (project_id, name, parent_id, sort_order, color) VALUES (?, ?, ?, ?, ?)')
+              .run(pid, name, parent, first ? nextOrder('folders', 'parent_id', parent) : f.sort_order, f.color);
             folders.set(f.id, Number(res.lastInsertRowid));
             if (first) madeTops.set(`folder-${f.id}`, { kind: 'folder', id: Number(res.lastInsertRowid), name });
           }

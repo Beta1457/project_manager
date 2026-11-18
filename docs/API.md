@@ -99,7 +99,7 @@ A template is `{id, projectId, name, title, description, type, priority, categor
 
 ## Folders, tree and files
 
-- `GET /api/v1/folders` · `POST {name*, parentId}` · `PATCH /:id {name?, parentId?}` (cycles rejected) · `DELETE /:id` (contents move to the parent)
+- `GET /api/v1/folders` · `POST {name*, parentId, color}` · `PATCH /:id {name?, parentId?, color?}` (cycles rejected) · `DELETE /:id` (contents move to the parent). `color` is the folder's colour in the explorer, `#RRGGBB` (stored in lower case), or `null` for the default look; folders return it as `color`.
 - `GET /api/v1/tree` — folders, epochs, tasks and files in one response (used by the explorer)
 - `GET /api/v1/files?folder=<id|root>` · `GET /api/v1/files/:id`
 - `POST /api/v1/files` — `multipart/form-data`; optional field `folderId` before one or more file parts
@@ -113,6 +113,7 @@ A template is `{id, projectId, name, title, description, type, priority, categor
   - Only the items asked for are renamed, to "Name (copy)" or "Name (copy 2)", when the name is taken where they land.
   - At most 2,000 items and 500 MB of files in one copy (400). All or nothing: if anything fails, nothing is made.
 - `POST /api/v1/explorer/move {items*, to*: {folderId} | {epochId}}` — the explorer's multi-select: moves up to 500 items of any kinds (same `{kind, id}` list as copy) → `{ok, moved}`. What is inside a folder or epoch that moves goes with it, including any of the items inside it, and items already there stay as they are. The rules are the same as for one item: only tasks go into an epoch, and a folder can't go into itself or a folder inside it (400, naming the item). All or nothing.
+- `POST /api/v1/explorer/color {items*, color*}` — gives up to 500 folders one colour (`#RRGGBB`, or `null` for the default look) → `{ok, colored}`. Only folders (400 otherwise, naming the items); what is inside them keeps its own colour. All or nothing.
 - `POST /api/v1/explorer/delete {items*, withSubtasks?, deleteTime?}` — deletes up to 500 items of any kinds → `{ok, deleted: {folders, epochs, tasks, files}}`. Each goes as it would on its own: tasks (with their checklists, comments, links and time) and files are deleted for good, the rest of a folder's contents move up to its parent, and the rest of an epoch's tasks move to its folder. Sub-tasks of deleted tasks move up a level unless `withSubtasks: true`, which deletes them at every level. If an epoch has time logged directly on it, the request is refused with 409 unless `deleteTime: true`. All or nothing.
 - Upload field `purpose=attachment` (without `folderId`) stores the file in the project's root **Attachments** folder. The web editors use this for images pasted into task and epoch descriptions.
 - Markdown/text documents: `POST /api/v1/docs {name*, folderId?, content?}` (`.md` added if there's no extension) · `PUT /api/v1/files/:id/content {content}` (text files only, max 2 MB)

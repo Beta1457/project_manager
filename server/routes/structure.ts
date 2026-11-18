@@ -285,31 +285,33 @@ export function registerStructureRoutes(app: FastifyInstance, ctx: AppContext): 
     parentId: r.parent_id as number | null,
     name: r.name as string,
     sortOrder: r.sort_order as number,
+    /** "#rrggbb", or null for the plain folder look. */
+    color: (r.color as string | null) ?? null,
   });
+  /** A folder colour from a request: "#RRGGBB", or null (or "") for none. */
+  const folderColor = (c: string | null | undefined) => (c ? assertColor(c) : null);
+  const folderProps = {
+    name: { type: 'string', maxLength: 200 },
+    parentId: { type: ['integer', 'null'], minimum: 1 },
+    color: { type: ['string', 'null'], maxLength: 7 },
+  };
 
   app.get('/api/v1/folders', async (req) => ({
     folders: db.prepare('SELECT * FROM folders WHERE project_id = ? ORDER BY sort_order, name').all(access.current(req).id).map(folderDto),
   }));
 
-  app.post<{ Body: { name: string; parentId?: number | null } }>(
+  app.post<{ Body: { name: string; parentId?: number | null; color?: string | null } }>(
     '/api/v1/folders',
-    {
-      schema: {
-        body: {
-          type: 'object',
-          required: ['name'],
-          properties: { name: { type: 'string', maxLength: 200 }, parentId: { type: ['integer', 'null'], minimum: 1 } },
-        },
-      },
-    },
+    { schema: { body: { type: 'object', required: ['name'], properties: folderProps } } },
     async (req, reply) => {
       const { actor } = requireAuth(req);
       const pid = access.current(req).id;
       const parentId = req.body.parentId ?? null;
       assertFolder(parentId, pid);
+      const color = folderColor(req.body.color);
       const res = db
-        .prepare('INSERT INTO folders (project_id, name, parent_id, sort_order) VALUES (?, ?, ?, ?)')
-        .run(pid, nonEmpty(req.body.name, 'Name', 200), parentId, nextOrder(db, pid, 'folders', 'parent_id', parentId));
+        .prepare('INSERT INTO folders (project_id, name, parent_id, sort_order, color) VALUES (?, ?, ?, ?, ?)')
+        .run(pid, nonEmpty(req.body.name, 'Name', 200), parentId, nextOrder(db, pid, 'folders', 'parent_id', parentId), color);
       const id = Number(res.lastInsertRowid);
       bus.emit({ kind: 'folders', id, actor });
       reply.code(201);
@@ -317,25 +319,20 @@ export function registerStructureRoutes(app: FastifyInstance, ctx: AppContext): 
     },
   );
 
-  app.patch<{ Params: { id: string }; Body: { name?: string; parentId?: number | null } }>(
+  app.patch<{ Params: { id: string }; Body: { name?: string; parentId?: number | null; color?: string | null } }>(
     '/api/v1/folders/:id',
-    {
-      schema: {
-        body: {
-          type: 'object',
-          properties: { name: { type: 'string', maxLength: 200 }, parentId: { type: ['integer', 'null'], minimum: 1 } },
-        },
-      },
-    },
+    { schema: { body: { type: 'object', properties: folderProps } } },
     async (req) => {
       const { actor } = requireAuth(req);
       const { id, project } = folderIn(req, req.params.id);
       const b = req.body;
+      const color = has(b, 'color') ? folderColor(b.color) : undefined;
       // One transaction: a rejected move must not leave the rename half-applied.
       tx(db, () => {
         if (b.name !== undefined) {
           db.prepare('UPDATE folders SET name = ?, updated_at = ? WHERE id = ?').run(nonEmpty(b.name, 'Name', 200), nowIso(), id);
         }
+        if (color !== undefined) db.prepare('UPDATE folders SET color = ?, updated_at = ? WHERE id = ?').run(color, nowIso(), id);
         if (has(b, 'parentId')) {
           const parentId = b.parentId ?? null;
           assertFolder(parentId, project.id);

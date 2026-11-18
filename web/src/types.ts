@@ -156,6 +156,8 @@ export interface Folder {
   parentId: number | null;
   name: string;
   sortOrder: number;
+  /** "#rrggbb", or null for the default look. */
+  color: string | null;
 }
 
 export interface FileItem {

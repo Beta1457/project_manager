@@ -45,6 +45,7 @@ export type ActionId =
   | 'duplicate'
   | 'move'
   | 'rename'
+  | 'color'
   | 'delete';
 
 export interface ActionContext {
@@ -325,11 +326,13 @@ export function explorerActions(target: Target, ctx: ActionContext): Node[] {
     ...(canPaste ? pasteHere : []),
     action('duplicate', 'Duplicate'),
   ];
-  const manage: Node[] = [
+  const manage = (...extra: Node[]): Node[] => [
     action('move', 'Move to…'),
     action('rename', 'Rename…', { shortcut: SHORTCUTS.rename }),
+    ...extra,
     action('delete', 'Delete…', { danger: true, shortcut: SHORTCUTS.delete }),
   ];
+  const color = (label: string) => action('color', label, { icon: '🎨' });
   const toggle = action('toggle', ctx.expanded ? 'Collapse' : 'Expand');
   // Starts a selection with this row (the same as Ctrl+click), for anyone who doesn't know the shortcut.
   const select = action('select', ctx.selected ? 'Deselect' : 'Select', { icon: '☑', shortcut: SHORTCUTS.select });
@@ -339,18 +342,21 @@ export function explorerActions(target: Target, ctx: ActionContext): Node[] {
       return [newMenu(false), ...(pasteHere.length ? [SEP, ...pasteHere] : [])];
     case 'inbox':
       return [action('new-task', 'New task…', { icon: ICONS.task }), ...fromTemplate('New task from template…'), ...(pasteHere.length ? [SEP, ...pasteHere] : [])];
-    case 'selection':
+    case 'selection': {
+      const folders = target.items.filter((i) => i.kind === 'folder').length;
       return [
         action('cut', 'Cut', { shortcut: SHORTCUTS.cut }),
         action('copy', 'Copy', { shortcut: SHORTCUTS.copy }),
         action('duplicate', 'Duplicate'),
         action('move', 'Move to…'),
+        ...(folders ? [color(`Colour ${plural(folders, 'folder')}…`)] : []),
         SEP,
         action('clear-selection', 'Clear selection', { shortcut: 'Esc' }),
         action('delete', `Delete ${target.items.length} items…`, { danger: true, shortcut: SHORTCUTS.delete }),
       ];
+    }
     case 'folder':
-      return [newMenu(true), toggle, select, SEP, ...clipboard(true), SEP, ...manage];
+      return [newMenu(true), toggle, select, SEP, ...clipboard(true), SEP, ...manage(color('Colour…'))];
     case 'epoch':
       return [
         action('open', 'Open'),
@@ -361,14 +367,14 @@ export function explorerActions(target: Target, ctx: ActionContext): Node[] {
         SEP,
         ...clipboard(true),
         SEP,
-        ...manage,
+        ...manage(),
       ];
     case 'task': {
       const t = tree.tasks.find((x) => x.id === target.id);
       // A task on the deepest level sub-tasks can go to can't have sub-tasks of its own.
       const roomBelow = ctx.maxSubtaskDepth === undefined || levelOf(tree, target.id) < ctx.maxSubtaskDepth;
       const subtask = t && roomBelow ? [action('add-subtask', 'Add sub-task…', { icon: ICONS.task })] : [];
-      return [action('open', 'Open'), ...subtask, select, SEP, ...clipboard(false), SEP, ...manage];
+      return [action('open', 'Open'), ...subtask, select, SEP, ...clipboard(false), SEP, ...manage()];
     }
     case 'file': {
       const f = tree.files.find((x) => x.id === target.id);
@@ -380,7 +386,7 @@ export function explorerActions(target: Target, ctx: ActionContext): Node[] {
         SEP,
         ...clipboard(false),
         SEP,
-        ...manage,
+        ...manage(),
       ];
     }
   }
