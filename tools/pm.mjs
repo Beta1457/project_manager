@@ -10,9 +10,16 @@
 //   2. .pm.json in the current directory or any parent: {"url": "http://SERVER:8080", "token": "pm_...", "project": "KEY"}
 //   3. ~/.pm.json
 // "project" picks which of your projects the commands work in; --project KEY overrides it for one command.
+// "fallbackUrls": ["https://pm.example.ts.net"] in .pm.json lists other addresses of the same server, tried in order
+// when "url" doesn't answer (the home address first, say, then Tailscale when away). PM_URL can hold several
+// addresses too, separated by commas.
+//
+// When no address answers, changes to tasks and time tracking are saved on this computer (~/.pm-offline) and sent by
+// the next pm command that reaches the server: see "Offline" in `node pm.mjs help`.
 //
 // Run `node pm.mjs help` for commands.
 
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -36,12 +43,18 @@ function loadConfig() {
   let url = process.env.PM_URL;
   let token = process.env.PM_TOKEN;
   let project = process.env.PM_PROJECT;
+  let fallbacks = [];
   let file = null;
+  let urlFrom = 'PM_URL';
   if (!url || !token) {
     file = findConfig();
     if (file) {
       const cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
-      url ||= cfg.url;
+      if (!url) {
+        url = cfg.url;
+        urlFrom = file;
+        fallbacks = [].concat(cfg.fallbackUrls ?? []);
+      }
       token ||= cfg.token;
       project ||= cfg.project;
     }
@@ -49,7 +62,18 @@ function loadConfig() {
   if (!url || !token) fail('Not configured. Set PM_URL and PM_TOKEN, or create .pm.json with {"url": "...", "token": "...", "project": "KEY"}');
   // --project KEY (any command) works in another of your projects just this once.
   if (PROJECT_FLAG) project = PROJECT_FLAG;
-  return { url: url.replace(/\/+$/, ''), token, project: project ? String(project) : undefined, file };
+  // The server's addresses in the order to try them: "url" (or each one in PM_URL), then "fallbackUrls".
+  const urls = [...new Set([...String(url).split(','), ...fallbacks].map((u) => String(u).trim().replace(/\/+$/, '')).filter(Boolean))];
+  for (const u of urls) {
+    let protocol;
+    try {
+      ({ protocol } = new URL(u));
+    } catch {
+      /* said below */
+    }
+    if (protocol !== 'http:' && protocol !== 'https:') fail(`"${u}" in ${urlFrom} is not a web address like http://SERVER:8080 or https://SERVER`);
+  }
+  return { urls, token, project: project ? String(project) : undefined, file };
 }
 
 /** Headers for every request: the token, and the project the command works in. */
@@ -90,10 +114,148 @@ function parseArgs(argv) {
   return { pos, flags };
 }
 
+// ----------------------------------------------------------------- server ----
+
+/** Nothing reached the server: no address answered, or a connection failed before anything was sent. */
+class Offline extends Error {}
+
+/** How long the address that answered is used before the addresses are checked in order again. */
+const SERVER_MEMO_MS = 10 * 60 * 1000;
+/** After no address answered, how long changes are saved offline straight away instead of waiting on timeouts again. */
+const OFFLINE_MEMO_MS = 60 * 1000;
+/** Fetch failures where nothing reached the server, so it can't have done anything. */
+const NOT_SENT = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH', 'EADDRNOTAVAIL', 'UND_ERR_CONNECT_TIMEOUT', 'bad port']);
+const notSent = (code) => NOT_SENT.has(code) || /CERT|SELF_SIGNED|UNABLE_TO_VERIFY|ERR_TLS|ERR_SSL/.test(code); // TLS fails before sending
+
+/** Why a fetch failed, in a word: ECONNREFUSED, ENOTFOUND, timeout... */
+function errCode(err) {
+  if (err?.name === 'TimeoutError') return 'timeout';
+  const cause = err?.cause;
+  return String(cause?.code ?? cause?.errors?.find((e) => e?.code)?.code ?? cause?.message ?? err?.message ?? err);
+}
+
+/** An address no other computer can answer for: https (its certificate proves which server it is), or this computer. */
+function trusted(url) {
+  try {
+    const { protocol, hostname } = new URL(url);
+    return protocol === 'https:' || hostname === 'localhost' || hostname === '[::1]' || /^127\./.test(hostname);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * What pm remembers between commands (each one is a new process): which address answered, or that none did. In the
+ * temp folder; losing it only means checking the addresses again.
+ */
+function memoFile() {
+  const key = crypto.createHash('sha256').update(CFG.urls.join('\n')).digest('hex').slice(0, 16);
+  return path.join(os.tmpdir(), `pm-server-${key}.json`);
+}
+function readMemo() {
+  try {
+    const memo = JSON.parse(fs.readFileSync(memoFile(), 'utf8'));
+    const age = Date.now() - memo.at;
+    return age >= 0 ? { ...memo, age } : {};
+  } catch {
+    return {};
+  }
+}
+function writeMemo(memo) {
+  try {
+    if (memo) fs.writeFileSync(memoFile(), JSON.stringify({ ...memo, at: Date.now() }), { mode: 0o600 });
+    else fs.rmSync(memoFile(), { force: true });
+  } catch {
+    /* only a shortcut */
+  }
+}
+/** No address answered a moment ago, so a change can be saved offline without waiting on timeouts again. */
+function offlineLately() {
+  const memo = readMemo();
+  return memo.offline === true && memo.age < OFFLINE_MEMO_MS;
+}
+/** No address answers: remembers that for a minute, and stops whatever was being sent. */
+function goOffline(why) {
+  CFG.offline = why;
+  writeMemo({ offline: true });
+  throw new Offline(why);
+}
+
+/** Whether the Project Manager answers at this address. Asked without the token, before the token goes there. */
+async function probe(base, ms) {
+  const res = await fetch(`${base}/api/health`, { signal: AbortSignal.timeout(ms) });
+  const data = await res.json().catch(() => ({}));
+  if (data.ok !== true) throw new Error(res.ok ? 'not the Project Manager' : `HTTP ${res.status}`);
+}
+
+/**
+ * The server address to use. With one address, that one. With fallbacks, the first in order where the Project Manager
+ * answers. That's remembered for a few minutes when it's https or this computer; a plain-http address of another
+ * computer is checked every time instead, so the token never goes to a different computer that has the same address
+ * on another network. `failed`: an address that just stopped answering, checked last.
+ */
+async function serverUrl({ failed } = {}) {
+  CFG ??= loadConfig();
+  if (CFG.offline) throw new Offline(CFG.offline);
+  if (CFG.base && !failed) return CFG.base;
+  if (CFG.urls.length === 1) return (CFG.base = CFG.urls[0]);
+  CFG.remembered = false;
+  const memo = failed ? {} : readMemo();
+  if (memo.url && memo.age < SERVER_MEMO_MS && CFG.urls.includes(memo.url) && trusted(memo.url)) {
+    CFG.remembered = true;
+    return (CFG.base = memo.url);
+  }
+  const order = failed ? [...CFG.urls.filter((u) => u !== failed), failed] : CFG.urls;
+  const tried = [];
+  for (const [i, base] of order.entries()) {
+    try {
+      // A short wait for all but the last, so an address that isn't there (home, away) doesn't hold things up.
+      await probe(base, i < order.length - 1 ? 3000 : 6000);
+      writeMemo(trusted(base) ? { url: base } : null); // replaces "none answered", if that was remembered
+      CFG.offlineMemo = false;
+      return (CFG.base = base);
+    } catch (err) {
+      tried.push(`${base} (${errCode(err)})`);
+    }
+  }
+  return goOffline(`Cannot reach the Project Manager at ${tried.join(' or ')}`);
+}
+
 // ------------------------------------------------------------------- http ----
 
 let CFG;
 let PROJECT_FLAG; // --project KEY, set before any command runs
+/** Changes this command sent that reached the server. It can only be saved for later while this is 0. */
+let WROTE = 0;
+
+/**
+ * fetch on the server. A read whose connection fails, or a change that never left this computer, means offline (see
+ * Offline). A remembered address that stopped answering is swapped for one that answers, once.
+ */
+async function send(url, init = {}) {
+  const read = !init.method || init.method === 'GET';
+  let base = await serverUrl();
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const res = await fetch(base + url, init);
+      if (!read && !REPLAYING) WROTE++;
+      if (CFG.offlineMemo) {
+        // It answers again, so changes go straight to it instead of being saved offline for the rest of the minute.
+        CFG.offlineMemo = false;
+        writeMemo(null);
+      }
+      return res;
+    } catch (err) {
+      const code = errCode(err);
+      if (!read && !notSent(code)) {
+        fail(`Lost the connection to ${base} while sending (${code}). The change may or may not have been made: check before trying again.`);
+      }
+      if (attempt === 0 && CFG.remembered) base = await serverUrl({ failed: base });
+      else goOffline(`Cannot reach ${base} (${code})`);
+    }
+  }
+}
+
 /** Calls the API. `soft`: return { error, status } instead of exiting when the server says no. */
 async function http(method, url, body, { soft = false } = {}) {
   const headers = authHeaders();
@@ -103,12 +265,7 @@ async function http(method, url, body, { soft = false } = {}) {
     headers['content-type'] = 'application/json';
     payload = JSON.stringify(body ?? {});
   }
-  let res;
-  try {
-    res = await fetch(CFG.url + url, { method, headers, body: payload });
-  } catch (err) {
-    fail(`Cannot reach ${CFG.url} (${err.cause?.code ?? err.message}). Is the server running and on this network?`);
-  }
+  const res = await send(url, { method, headers, body: payload });
   const text = await res.text();
   let data;
   try {
@@ -129,13 +286,7 @@ async function http(method, url, body, { soft = false } = {}) {
 }
 /** GET returning the raw Response (file contents). */
 async function rawGet(url) {
-  const headers = authHeaders();
-  let res;
-  try {
-    res = await fetch(CFG.url + url, { headers });
-  } catch (err) {
-    fail(`Cannot reach ${CFG.url} (${err.cause?.code ?? err.message}). Is the server running and on this network?`);
-  }
+  const res = await send(url, { headers: authHeaders() });
   if (!res.ok) {
     const text = await res.text();
     let msg = text;
@@ -153,7 +304,12 @@ const del = (u) => http('DELETE', u);
 
 // ---------------------------------------------------------------- helpers ----
 
+/** A saved offline change that failed when it was sent later (see flushOutbox). Anywhere else, fail() ends pm. */
+class Failed extends Error {}
+let REPLAYING = false;
+
 function fail(msg) {
+  if (REPLAYING) throw new Failed(msg);
   console.error(`pm: ${msg}`);
   process.exit(1);
 }
@@ -184,6 +340,7 @@ async function currentProject() {
 /** "APP-12" or "app-12" → "APP-12"; a bare "12" (or "#12") means task 12 of the current project. */
 async function taskRef(raw, what = 'task key') {
   const s = String(need(raw, what)).trim().replace(/^#/, '');
+  if (TEMP_KEY.test(s)) return tempKeyRef(s.toUpperCase());
   if (/^\d+$/.test(s)) return `${(await currentProject()).key}-${s}`;
   if (/^[A-Za-z][A-Za-z0-9]{0,9}-\d+$/.test(s)) return s.toUpperCase();
   fail(`"${raw}" is not a task key. Keys look like ${CURRENT?.key ?? 'APP'}-12 (a bare 12 means task 12 of the current project).`);
@@ -271,8 +428,8 @@ function printSubtask(c) {
   console.log(`  ${c.key} [${c.statusLabel}] ${c.title}${c.epochName ? `  (epoch "${c.epochName}")` : ''}${own}`);
 }
 
-/** Something a user would type as a task: APP-12, app-12, 12 or #12. */
-const KEY_LIKE = /^#?\d+$|^[A-Za-z][A-Za-z0-9]{0,9}-\d+$/;
+/** Something a user would type as a task: APP-12, app-12, 12 or #12, or NEW_3 for one created offline. */
+const KEY_LIKE = /^#?\d+$|^[A-Za-z][A-Za-z0-9]{0,9}-\d+$|^NEW_\d+$/i;
 
 /**
  * The task keys at the start of a command line, and the words after them:
@@ -333,6 +490,450 @@ function taskBody(flags) {
   return body;
 }
 
+// ---------------------------------------------------------------- offline ----
+// When the server can't be reached, changes to tasks and time tracking are saved on this computer and sent, oldest
+// first, by the next pm command that reaches it (or pm queue send). One queue per .pm.json, in ~/.pm-offline. What's
+// saved is the command itself, run again later with the token of that time: the queue never holds the token.
+
+/** Commands that can be saved for later: each sends one request (all or nothing), so sending it later can't half-repeat it. */
+const SAVABLE = {
+  task: ['create', 'new', 'update', 'edit', 'advance', 'next', 'status', 'move', 'note', 'comment', 'check', 'link', 'unlink'],
+  time: ['start', 'stop', 'log', 'add'],
+};
+const savable = (cmd, sub) => cmd === 'item' || Boolean(SAVABLE[cmd]?.includes(sub));
+
+/** A task created offline goes by NEW_<n> until it's sent and gets its real key. */
+const TEMP_KEY = /^NEW_\d+$/i;
+/** NEW_<n> → { key, at }: the real keys of tasks created offline, kept a week (see writeOutbox). */
+let KEYS = {};
+/** The task the last pm task create made; a saved one, when sent, gives its NEW_<n> the real key. */
+let CREATED;
+
+function outboxFile() {
+  const where = CFG.file ? path.resolve(CFG.file) : `env ${CFG.urls.join(' ')}`;
+  const id = crypto.createHash('sha256').update(process.platform === 'win32' ? where.toLowerCase() : where).digest('hex').slice(0, 10);
+  const name = CFG.file ? path.basename(path.dirname(where)).replace(/[^\w.-]/g, '_') : 'env';
+  return path.join(os.homedir(), '.pm-offline', `${name}-${id}.json`);
+}
+
+const emptyBox = () => ({ version: 1, seq: 1, entries: [], failed: [], timer: null, keys: {} });
+
+/** Waits without giving other work a turn: only for short waits on a file. */
+const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+/** Errors from a file another program has open for a moment (on Windows: a virus scanner, the search indexer). */
+const BUSY = new Set(['EPERM', 'EACCES', 'EBUSY']);
+
+function readOutbox() {
+  const file = outboxFile();
+  let text;
+  for (let tries = 1; text === undefined; tries++) {
+    try {
+      text = fs.readFileSync(file, 'utf8');
+    } catch (err) {
+      if (err.code === 'ENOENT') return emptyBox();
+      // Never taken for an empty queue: whatever is saved next would replace what's in there.
+      if (tries >= 20 || !BUSY.has(err.code)) fail(`Could not read the offline queue ${file} (${err.message})`);
+      sleepSync(50);
+    }
+  }
+  try {
+    const box = { ...emptyBox(), ...JSON.parse(text) };
+    if (!Array.isArray(box.entries) || !Array.isArray(box.failed) || typeof box.keys !== 'object' || !box.keys) {
+      throw new Error('not a pm offline queue');
+    }
+    return box;
+  } catch (err) {
+    // Kept aside rather than lost, and out of the way of every other pm command.
+    const aside = `${file}.unreadable-${Date.now()}`;
+    try {
+      fs.renameSync(file, aside);
+    } catch {
+      /* reported below either way */
+    }
+    console.error(`pm: the offline queue couldn't be read (${err.message}); it was moved to ${aside}`);
+    return emptyBox();
+  }
+}
+
+function writeOutbox(box) {
+  const file = outboxFile();
+  const weekAgo = Date.now() - 7 * 24 * 3600 * 1000;
+  for (const [temp, k] of Object.entries(box.keys)) if (!(Date.parse(k.at) >= weekAgo)) delete box.keys[temp];
+  if (!box.entries.length && !box.failed.length && !box.timer && !Object.keys(box.keys).length) {
+    fs.rmSync(file, { force: true });
+    return;
+  }
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify(box, null, 2)}\n`, { mode: 0o600 });
+  // All at once, so another pm reading it never sees half a file. On Windows a virus scanner or the search indexer
+  // can have the file open for a moment, so that's waited out.
+  for (let tries = 1; ; tries++) {
+    try {
+      fs.renameSync(tmp, file);
+      return;
+    } catch (err) {
+      if (tries >= 20 || !BUSY.has(err.code)) throw err;
+      sleepSync(50);
+    }
+  }
+}
+
+/** A pm holding the queue's lock touches it this often, so the others can tell it's still at work. */
+const LOCK_BEAT_MS = 5_000;
+/** A lock untouched for this long was left by a pm that's gone (killed, say), and is taken over. */
+const LOCK_STALE_MS = 30_000;
+const LOCK_ID = `${process.pid}@${os.hostname()}`;
+let LOCK; // the queue's lock file, while this pm holds it
+
+/** Who holds a lock and when they last touched it; undefined when nobody does, id null when it can't be read. */
+function lockHolder(lock) {
+  try {
+    return { id: fs.readFileSync(lock, 'utf8'), touched: fs.statSync(lock).mtimeMs };
+  } catch (err) {
+    return err.code === 'ENOENT' ? undefined : { id: null, touched: Date.now() };
+  }
+}
+
+/** Whether the pm holding a lock is gone: silent for too long, or no longer running on this computer. */
+function lockGone({ id, touched }) {
+  if (id === null) return false; // can't tell: waited out
+  if (Date.now() - touched > LOCK_STALE_MS) return true;
+  const [pid, host] = id.split('@');
+  if (host !== os.hostname() || !/^\d+$/.test(pid)) return false;
+  try {
+    process.kill(Number(pid), 0); // only asks whether it's running
+    return false;
+  } catch (err) {
+    return err.code === 'ESRCH';
+  }
+}
+
+function releaseLock() {
+  try {
+    if (LOCK && lockHolder(LOCK)?.id === LOCK_ID) fs.rmSync(LOCK, { force: true });
+  } catch {
+    /* the next pm finds this one gone and takes it over */
+  }
+  LOCK = undefined;
+}
+process.on('exit', releaseLock);
+
+/**
+ * Runs fn(box, save) with the queue locked, since pm commands can run side by side, and saves the box afterwards.
+ * save() writes it straight away, for changes that must not be lost if pm is stopped halfway.
+ */
+async function withOutbox(fn) {
+  const file = outboxFile();
+  const lock = `${file}.lock`;
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  for (const giveUp = Date.now() + 120_000; ; ) {
+    let busy = false;
+    try {
+      fs.writeFileSync(lock, LOCK_ID, { flag: 'wx' });
+      break;
+    } catch (err) {
+      if (BUSY.has(err.code)) busy = true; // Windows: the pm that had it is still letting go
+      else if (err.code !== 'EEXIST') throw err;
+    }
+    const holder = busy ? { id: null, touched: Date.now() } : lockHolder(lock);
+    if (!holder) continue; // just let go
+    if (lockGone(holder)) {
+      try {
+        // Looked at once more right before it goes, so a lock another pm has only just taken over stays.
+        const still = lockHolder(lock);
+        if (still?.id === holder.id && still.touched === holder.touched) fs.rmSync(lock);
+        continue;
+      } catch {
+        /* waited out below */
+      }
+    }
+    if (Date.now() > giveUp) fail(`Another pm command has been busy with the offline queue for 2 minutes. Try again, or delete ${lock} if no pm is running.`);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  LOCK = lock;
+  const beat = setInterval(() => {
+    try {
+      const now = new Date();
+      fs.utimesSync(lock, now, now);
+    } catch {
+      /* checked when it's saved */
+    }
+  }, LOCK_BEAT_MS);
+  beat.unref();
+  const own = () => {
+    const holder = lockHolder(lock);
+    return holder !== undefined && (holder.id === LOCK_ID || holder.id === null); // null: can't be read just now
+  };
+  const box = readOutbox();
+  const save = () => {
+    // Only if this pm was so slow (its computer asleep, say) that another one took the queue over.
+    if (!own()) fail('Another pm command took over the offline queue while this one was sending it. What is left is sent by the next pm command.');
+    writeOutbox(box);
+  };
+  try {
+    return await fn(box, save);
+  } finally {
+    clearInterval(beat);
+    try {
+      if (own()) writeOutbox(box);
+    } finally {
+      releaseLock();
+    }
+  }
+}
+
+/** NEW_3, a task created offline: its real key once it's been sent; still NEW_3 while changes are being saved offline. */
+function tempKeyRef(temp) {
+  if (KEYS[temp]) return KEYS[temp].key;
+  const box = readOutbox();
+  const refused = box.failed.find((e) => e.tempKey === temp);
+  if (refused) fail(`${temp} was never created: the server refused it (${refused.error}). pm queue shows it.`);
+  if (!box.entries.some((e) => e.tempKey === temp)) fail(`${temp} is not a task saved offline here (pm queue shows those).`);
+  // Still waiting to be sent: a change saved offline can use it, since it's sent after the task is created.
+  if (CFG.offline && !REPLAYING) return temp;
+  fail(`${temp} hasn't been sent to the server yet (pm queue send sends it).`);
+}
+
+/** 14:05 today, or 2026-11-19 14:05 another day (this computer's clock). */
+function when(iso) {
+  const d = new Date(iso);
+  const p = (n) => String(n).padStart(2, '0');
+  const time = `${p(d.getHours())}:${p(d.getMinutes())}`;
+  return d.toDateString() === new Date().toDateString() ? time : `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${time}`;
+}
+
+const targetName = (t) => t.task ?? `epoch ${t.epoch}`;
+
+/** A saved change in words, for pm queue and the report once it's sent. */
+function describe(e) {
+  if (e.kind === 'time-log') return `time log ${fmtMin(e.minutes)} on ${targetName(e.target)} from ${when(e.startedAt)}${e.note ? ` "${e.note}"` : ''}`;
+  if (e.kind === 'timer-stop') return `time stop as of ${when(e.stopAt)} (the timer running on the server, if any)`;
+  const shown = (a) => (a.length > 60 ? `${a.slice(0, 57)}...` : a);
+  return `pm ${e.argv.map((a) => (/^[\w@%+=:,./#-]+$/.test(a) ? a : JSON.stringify(shown(a)))).join(' ')}`;
+}
+
+/** What a command saved offline prints: what was saved, and that it's sent later (--json: as JSON). */
+function sayOffline(flags, waiting, lines, extra = {}) {
+  if (flags.json) return console.log(JSON.stringify({ savedOffline: true, ...extra, waiting }, null, 2));
+  for (const line of lines) if (line) console.log(line);
+  console.log(`(${CFG.offline}. ${plural(waiting, 'change is', 'changes are')} saved on this computer; the next pm command that reaches the server sends them, and pm queue lists them.)`);
+}
+
+/** The command with --desc-file swapped for the file's text now: the file may change before the command is sent. */
+function withFileText(argv) {
+  const text = (file) => {
+    try {
+      return fs.readFileSync(file, 'utf8');
+    } catch (err) {
+      return fail(`Could not read ${file} (${err.message})`);
+    }
+  };
+  const saved = [];
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--desc-file') saved.push('--desc', text(argv[++i]));
+    else if (a.startsWith('--desc-file=')) saved.push('--desc', text(a.slice('--desc-file='.length)));
+    else saved.push(a);
+  }
+  return saved;
+}
+
+/** Saves a command that couldn't reach the server, to be sent later, and says so. */
+async function saveForLater(cmd, rest, flags, argv) {
+  const sub = cmd === 'item' ? undefined : rest[0];
+  const now = new Date();
+  const base = { at: now.toISOString(), project: CFG.project ?? null };
+  if (cmd === 'time' && (sub === 'start' || sub === 'stop')) return saveTimer(sub, flags, base, now);
+  const saved = withFileText(argv);
+  if (cmd === 'time' && flags.date === undefined) saved.push('--date', now.toISOString()); // logged when it was done
+  const { entry, waiting } = await withOutbox((box) => {
+    const e = { id: box.seq++, ...base, argv: saved };
+    if (cmd === 'task' && (sub === 'create' || sub === 'new')) e.tempKey = `NEW_${e.id}`;
+    box.entries.push(e);
+    return { entry: e, waiting: box.entries.length };
+  });
+  sayOffline(
+    flags,
+    waiting,
+    [
+      `Saved offline${entry.tempKey ? ` as ${entry.tempKey}` : ''}: ${describe(entry)}`,
+      entry.tempKey && `Use ${entry.tempKey} for this task in other pm commands until then; it gets its real key when it's sent.`,
+    ],
+    { id: entry.id, ...(entry.tempKey ? { key: entry.tempKey } : {}) },
+  );
+}
+
+/** Ends the timer started offline: an entry with its real start and length, to be sent. */
+function logTimer(box, now, note) {
+  const t = box.timer;
+  box.timer = null;
+  const entry = {
+    id: box.seq++,
+    at: now.toISOString(),
+    project: t.project,
+    kind: 'time-log',
+    target: t.target,
+    startedAt: t.startedAt,
+    minutes: Math.max(1, Math.round((now - Date.parse(t.startedAt)) / 60000)),
+    note: [t.note, note].filter(Boolean).join('; '),
+  };
+  box.entries.push(entry);
+  return entry;
+}
+
+/** pm time start / stop without the server: the timer runs on this computer and is logged with its real times later. */
+async function saveTimer(sub, flags, base, now) {
+  const target = flags.task !== undefined ? { task: String(flags.task) } : flags.epoch !== undefined ? { epoch: String(flags.epoch) } : null;
+  if (sub === 'start' && !target) fail('Provide --task APP-12 or --epoch ID');
+  const note = sub === 'stop' && flags.note ? String(flags.note) : undefined;
+  const { logged, waiting } = await withOutbox((box) => {
+    let ended;
+    if (box.timer) ended = logTimer(box, now, note);
+    // None started here, but one may be running on the server: it stops now, as it would have.
+    else box.entries.push({ id: box.seq++, ...base, kind: 'timer-stop', stopAt: now.toISOString(), ...(note ? { note } : {}) });
+    if (sub === 'start') box.timer = { ...base, target, startedAt: now.toISOString(), note: flags.note ? String(flags.note) : '' };
+    return { logged: ended, waiting: box.entries.length };
+  });
+  const lines = [];
+  if (logged) lines.push(`Timer stopped: ${fmtMin(logged.minutes)} on ${targetName(logged.target)} (saved offline)`);
+  else if (sub === 'stop') lines.push(`Saved offline: the timer running on the server stops as of ${when(now)}`);
+  if (sub === 'start') lines.push(`Timer started on ${targetName(target)} at ${when(now)}, on this computer: it's logged with its real start and length once it's stopped and the server can be reached`);
+  sayOffline(flags, waiting, lines);
+}
+
+/** A timer started offline is still running: it's logged with its real times (sent now, or saved if still offline). */
+async function settleOfflineTimer(note) {
+  if (!readOutbox().timer) return undefined;
+  const logged = await withOutbox((box) => (box.timer ? logTimer(box, new Date(), note) : undefined));
+  if (logged) await flushOutbox();
+  return logged;
+}
+
+async function timeTarget(t) {
+  return t.task !== undefined ? { taskId: await taskRef(t.task) } : { epochId: await resolveEpoch(t.epoch) };
+}
+
+/** A timer that ran offline: a time entry with its real start and length (24 hours at most each, so maybe several). */
+async function replayTimeLog(e) {
+  const target = await timeTarget(e.target);
+  const total = e.minutes;
+  while (e.minutes > 0) {
+    const minutes = Math.min(e.minutes, 24 * 60);
+    await post('/api/v1/time', { ...target, minutes, date: e.startedAt, note: e.note || undefined });
+    // What's left, should a later piece be refused: retrying it never logs a piece twice.
+    e.startedAt = new Date(Date.parse(e.startedAt) + minutes * 60000).toISOString();
+    e.minutes -= minutes;
+  }
+  return `logged ${fmtMin(total)}`;
+}
+
+/** A timer stopped offline that runs on the server: stopped, then set to the length it had when it was stopped. */
+async function replayTimerStop(e) {
+  if (e.entryId === undefined) {
+    const { entry: running } = await get('/api/v1/time/running');
+    if (!running) return 'no timer was running on the server';
+    if (Date.parse(running.startedAt) > Date.parse(e.stopAt)) return `the server's timer started later (${when(running.startedAt)}), so it keeps running`;
+    const stopped = await post('/api/v1/time/stop', e.note ? { note: e.note } : {});
+    // Kept, should setting its length be refused: retrying it sets this entry's length rather than looking for a timer.
+    Object.assign(e, { entryId: stopped.id, startedAt: stopped.startedAt, minutes: stopped.minutes, on: stopped.taskKey ?? stopped.epochName });
+  }
+  const ran = Math.max(1, Math.round((Date.parse(e.stopAt) - Date.parse(e.startedAt)) / 60000));
+  const minutes = Math.min(ran, 24 * 60); // the longest one entry can be
+  if (minutes !== e.minutes) await patch(`/api/v1/time/${e.entryId}`, { minutes });
+  return `stopped the timer on ${e.on}: ${fmtMin(minutes)}${ran > minutes ? ` (it ran ${fmtMin(ran)}; one entry is 24 hours at most)` : ''}`;
+}
+
+/** Runs one saved change again, now that the server answers, in the project it was meant for. Returns what it said. */
+async function replay(entry, box) {
+  const keep = { project: CFG.project, current: CURRENT, log: console.log };
+  const said = [];
+  if ((entry.project ?? undefined) !== CFG.project) {
+    CFG.project = entry.project ?? undefined;
+    CURRENT = undefined;
+  }
+  REPLAYING = true;
+  console.log = (...args) => said.push(args.join(' '));
+  try {
+    if (entry.kind === 'time-log') return await replayTimeLog(entry);
+    if (entry.kind === 'timer-stop') return await replayTimerStop(entry);
+    CREATED = undefined;
+    const { pos, flags } = parseArgs(entry.argv);
+    delete flags.json; // what it says goes into the report, in words
+    const [cmd, ...rest] = pos;
+    await commands[cmd](rest, flags);
+    if (entry.tempKey && CREATED?.key) {
+      box.keys[entry.tempKey] = { key: CREATED.key, at: new Date().toISOString() };
+      return `${entry.tempKey} is ${CREATED.key}`;
+    }
+    return said.find(Boolean) ?? '';
+  } finally {
+    REPLAYING = false;
+    console.log = keep.log;
+    if (CFG.project !== keep.project) {
+      CFG.project = keep.project;
+      CURRENT = keep.current;
+    }
+  }
+}
+
+/**
+ * Sends the saved changes, oldest first. One the server refuses is kept aside (pm queue) and the rest go on; if the
+ * server stops answering, what's left waits for next time. Reports on stderr, so a command's own output stays clean.
+ */
+async function flushOutbox(say = (s) => console.error(s)) {
+  const sent = [];
+  const refused = [];
+  if (CFG.offline) return { sent: 0, refused: 0 };
+  await withOutbox(async (box, save) => {
+    KEYS = box.keys;
+    while (box.entries.length && !CFG.offline) {
+      const entry = box.entries[0];
+      try {
+        const result = await replay(entry, box);
+        box.entries.shift();
+        sent.push(`  ${describe(entry)}${result ? `  ->  ${result}` : ''}`);
+      } catch (err) {
+        if (err instanceof Offline) break;
+        box.entries.shift();
+        const error = err instanceof Failed ? err.message : `pm error: ${err?.message ?? err}`;
+        box.failed.push({ ...entry, error, failedAt: new Date().toISOString() });
+        refused.push(`  ${describe(entry)}\n      ${error}`);
+      }
+      save();
+    }
+  });
+  if (sent.length) say([`pm: sent ${plural(sent.length, 'change', 'changes')} saved while the server couldn't be reached:`, ...sent].join('\n'));
+  if (refused.length) {
+    say([`pm: ${plural(refused.length, 'saved change was', 'saved changes were')} refused, and kept aside (pm queue shows them; pm queue retry or drop):`, ...refused].join('\n'));
+  }
+  return { sent: sent.length, refused: refused.length };
+}
+
+/**
+ * Runs a command. What was saved offline goes first, so changes reach the server in the order they were made; when the
+ * server can't be reached, a change to a task or to the time tracking is saved for later instead of failing.
+ */
+async function run(cmd, rest, flags, argv) {
+  CFG ??= loadConfig();
+  const canSave = savable(cmd, rest[0]);
+  if (cmd !== 'queue') {
+    const box = readOutbox();
+    KEYS = box.keys;
+    CFG.offlineMemo = offlineLately();
+    if (canSave && CFG.offlineMemo) CFG.offline = 'The server could not be reached a moment ago';
+    else if (box.entries.length) await flushOutbox();
+  }
+  try {
+    await commands[cmd](rest, flags);
+  } catch (err) {
+    if (!(err instanceof Offline)) throw err;
+    if (!canSave) fail(`${err.message}. Is the server running, and can this computer reach it?`);
+    if (WROTE) fail(`${err.message}, after part of this command had been sent, so it wasn't saved for later: check what was done once the server can be reached.`);
+    await saveForLater(cmd, rest, flags, argv);
+  }
+}
+
 // --------------------------------------------------------------- commands ----
 
 const commands = {
@@ -386,6 +987,7 @@ const commands = {
         const parent = await parentRef(flags.parent);
         if (parent !== undefined) body.parent = parent;
         const t = await post('/api/v1/tasks', body);
+        CREATED = t;
         return out(flags, t, () => {
           console.log(`Created ${t.key}${t.children?.length ? ` with ${plural(t.children.length, 'sub-task', 'sub-tasks')}` : ''}`);
           printTask(t);
@@ -734,14 +1336,31 @@ const commands = {
       console.log(`#${e.id} ${fmtMin(e.minutes)}${e.running ? ' (running)' : ''}  ${e.taskKey ?? `epoch ${e.epochName}`}  ${e.actor}  ${e.note}`);
     switch (sub) {
       case 'start': {
-        const e = await post('/api/v1/time/start', { ...(await target()), note: flags.note });
+        const body = { ...(await target()), note: flags.note };
+        await settleOfflineTimer(); // like the server: starting a timer stops the one running
+        const e = await post('/api/v1/time/start', body);
         return out(flags, e, () => console.log(`Timer started on ${e.taskKey ?? e.epochName}`));
       }
       case 'stop': {
+        // A timer started while offline runs on this computer: it becomes an entry with its real start and length.
+        const logged = await settleOfflineTimer(flags.note);
+        if (logged) {
+          const waiting = readOutbox().entries.some((x) => x.id === logged.id);
+          return out(flags, logged, () =>
+            console.log(`Timer stopped: ${fmtMin(logged.minutes)} on ${targetName(logged.target)} (started while offline${waiting ? '; saved until the server can be reached' : ''})`),
+          );
+        }
         const e = await post('/api/v1/time/stop', { note: flags.note });
         return out(flags, e, () => console.log(`Timer stopped: ${fmtMin(e.minutes)} on ${e.taskKey ?? e.epochName}`));
       }
       case 'status': {
+        const local = readOutbox().timer;
+        if (local) {
+          const minutes = Math.max(0, Math.round((Date.now() - Date.parse(local.startedAt)) / 60000));
+          return out(flags, { ...local, minutes, running: true, offline: true }, () =>
+            console.log(`${fmtMin(minutes)} (running on this computer since ${when(local.startedAt)}; started while offline)  ${targetName(local.target)}  ${local.note}`),
+          );
+        }
         const { entry } = await get('/api/v1/time/running');
         return out(flags, entry, () => (entry ? showEntry(entry) : console.log('No timer running.')));
       }
@@ -1192,7 +1811,8 @@ const commands = {
 
   async whoami() {
     const me = await get('/api/auth/me');
-    console.log(`Connected to ${CFG.url} as ${me.actor} (user ${me.user.username})`);
+    console.log(`Connected to ${CFG.base} as ${me.actor} (user ${me.user.username})`);
+    if (CFG.urls.length > 1) console.log(`Server addresses, in the order pm tries them: ${CFG.urls.join(', ')}`);
     const cur = await http('GET', '/api/v1/projects/current', undefined, { soft: true });
     if (cur.error) console.log(`No project selected: ${cur.error}`);
     else console.log(`Project: ${cur.key} (${cur.name}), ${cur.openTaskCount} open tasks`);
@@ -1240,6 +1860,81 @@ const commands = {
       }
       default:
         fail('Try: project list | current | create --key K --name N [--color #hex] [--copy-from KEY] | use KEY');
+    }
+  },
+
+  /** pm queue [send | retry [id] | drop <id|failed>]: changes saved while the server couldn't be reached */
+  async queue([sub, raw], flags) {
+    const id = raw === undefined ? undefined : String(raw).replace(/^#/, ''); // pm queue shows them as #3
+    switch (sub ?? 'list') {
+      case 'list':
+      case 'ls':
+      case 'show': {
+        const box = readOutbox();
+        return out(flags, { file: outboxFile(), waiting: box.entries, refused: box.failed, timer: box.timer, keys: box.keys }, () => {
+          if (!box.entries.length && !box.failed.length && !box.timer) return console.log('Nothing is saved offline.');
+          if (box.entries.length) {
+            console.log('Waiting to be sent, oldest first (by the next pm command that reaches the server, or pm queue send):');
+            for (const e of box.entries) console.log(`  #${e.id}  saved ${when(e.at)}  ${describe(e)}`);
+          }
+          if (box.timer) {
+            console.log(`Timer running on this computer since ${when(box.timer.startedAt)} on ${targetName(box.timer.target)}; logged when it's stopped (pm time stop)`);
+          }
+          if (box.failed.length) {
+            console.log('Refused when sent (pm queue retry [id] tries again, pm queue drop <id|failed> throws away):');
+            for (const e of box.failed) console.log(`  #${e.id}  ${describe(e)}\n        ${e.error}`);
+          }
+        });
+      }
+      case 'send': {
+        if (!readOutbox().entries.length) return console.log('Nothing is waiting to be sent.');
+        const { refused } = await flushOutbox(console.log);
+        if (CFG.offline) fail(`${CFG.offline}. What wasn't sent stays saved.`);
+        if (refused) process.exitCode = 1;
+        return;
+      }
+      case 'retry': {
+        const back = await withOutbox((box) => {
+          const again = box.failed.filter((e) => id === undefined || String(e.id) === String(id));
+          box.failed = box.failed.filter((e) => !again.includes(e));
+          for (const e of again) {
+            delete e.error;
+            delete e.failedAt;
+          }
+          box.entries = [...box.entries, ...again].sort((a, b) => a.id - b.id);
+          return again.length;
+        });
+        if (!back) fail(id === undefined ? 'No refused changes to retry.' : `No refused change #${id} (pm queue lists them).`);
+        const { refused } = await flushOutbox(console.log);
+        if (CFG.offline) fail(`${CFG.offline}. What wasn't sent stays saved.`);
+        if (refused) process.exitCode = 1;
+        return;
+      }
+      case 'drop':
+      case 'rm': {
+        if (id === undefined) fail('Say which: pm queue drop <id> | failed | timer');
+        if (id === 'timer') {
+          const timer = await withOutbox((box) => {
+            const t = box.timer;
+            box.timer = null;
+            return t;
+          });
+          if (!timer) fail('No timer is running on this computer.');
+          return console.log(`Dropped the timer started offline on ${targetName(timer.target)} at ${when(timer.startedAt)}; no time is logged for it.`);
+        }
+        const gone = await withOutbox((box) => {
+          const all = [...box.entries, ...box.failed];
+          const dropped = id === 'failed' ? box.failed : all.filter((e) => String(e.id) === String(id));
+          box.entries = box.entries.filter((e) => !dropped.includes(e));
+          box.failed = box.failed.filter((e) => !dropped.includes(e));
+          return dropped;
+        });
+        if (!gone.length) fail(id === 'failed' ? 'No refused changes.' : `No saved change #${id} (pm queue lists them).`);
+        for (const e of gone) console.log(`Dropped #${e.id}: ${describe(e)}`);
+        return;
+      }
+      default:
+        fail('Try: pm queue | queue send | queue retry [id] | queue drop <id|failed|timer>');
     }
   },
 
@@ -1318,6 +2013,14 @@ Colours:  pm category list | create --name X [--color #hex] | update <name|id> [
 Other:    pm meta (valid statuses/types/categories) | pm backup (backup now) | pm whoami
           pm api <GET|POST|PATCH|PUT|DELETE> /api/v1/... [--body '{"json":1}' | --body-file body.json]
                                                     any endpoint in API.md (next to this file) with your token
+Offline:  when the server can't be reached, changes to tasks (create, update, status, advance, note, check, link,
+          unlink, pm item) and time tracking (start, stop, log) are saved on this computer, and the next pm command
+          that reaches the server sends them, oldest first. Never repeat a command that was saved: it would go twice.
+          A task created offline is NEW_1 (NEW_2, ...) until it's sent; use that key for it meanwhile. A timer started
+          offline runs here and is logged with its real start and length. Looking things up needs the server.
+          pm queue (what's saved) | queue send | queue retry [id] (refused ones) | queue drop <id|failed|timer>
+Addresses: "fallbackUrls" in .pm.json lists other addresses of the same server, tried in order when "url" doesn't
+          answer (pm whoami shows which one answered)
 
 Statuses: Open → In Progress → Alpha QA → Alpha Complete → Beta In Progress → Beta QA → Beta Complete → Ready to Ship
 Folder and epoch names are matched case-insensitively; use the id if a name is ambiguous.
@@ -1330,9 +2033,10 @@ function need(v, what) {
   return v;
 }
 
-const { pos, flags } = parseArgs(process.argv.slice(2));
+const argv = process.argv.slice(2);
+const { pos, flags } = parseArgs(argv);
 PROJECT_FLAG = flags.project;
 const [cmd, ...rest] = pos;
 if (!cmd || flags.help || cmd === 'help') commands.help();
 else if (!commands[cmd]) fail(`Unknown command "${cmd}". Run: pm help`);
-else await commands[cmd](rest, flags);
+else await run(cmd, rest, flags, argv);

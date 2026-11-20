@@ -29,6 +29,7 @@ A self-hosted project tracker that runs on your own computer or home server. You
   - Each box can show its file path, a one-line role, and a size that follows how big the code is. Agents can rebuild the whole diagram in one import.
 - **Colour coding**: each Kanban column, task type, category, epoch and project has its own colour, editable in Settings.
 - **Live sync**: every change is saved immediately and shows up on every open device.
+- **Agents keep working when the server can't be reached**: the agent's `pm` tool tries the server's other addresses in turn (home first, then a VPN, say). When none answers, it saves changes to tasks and time tracking on the computer and sends them once the server is back.
 - **Backups**: a snapshot every 4 hours (skipped if nothing changed), keeping 7 days.
 
 ## Screenshots
@@ -167,6 +168,14 @@ pm diagram add-node --label AuthService --layer services --parent Backend   /   
 pm diagram import diagram.json --yes        # many boxes and arrows in one save
 pm help
 ```
+
+**Several addresses, and offline.** If the server has more than one address, for example your home network and a VPN for when you're away, list the others under `fallbackUrls` in the code project's `.pm.json`. `pm` tries them in order:
+
+```json
+{ "url": "http://192.168.1.20:8080", "fallbackUrls": ["https://pm.example.ts.net"], "token": "pm_...", "project": "APP" }
+```
+
+Before `pm` sends your token to an address, it checks that the Project Manager answers there. It remembers https and same-computer addresses between commands for 10 minutes; a plain-http address is checked every time. When no address answers, changes to tasks and time tracking are saved on the computer (in `~/.pm-offline`), and the next `pm` command that reaches the server sends them, oldest first, so the agent can keep working. A task created meanwhile is called `NEW_1` until then, and a timer started offline is logged with its real start and length. `pm queue` lists what's waiting. Re-running the installer keeps `fallbackUrls`.
 
 The REST API is documented in [docs/API.md](docs/API.md).
 

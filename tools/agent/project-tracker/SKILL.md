@@ -209,11 +209,22 @@ pm api PATCH /api/v1/<path> --body-file <tmp.json>
 
 In API paths, use task keys (`APP-12`): a bare number there is the task's internal id, not its number. Prefer `--body-file` over `--body` for JSON (shell quoting on Windows is fragile).
 
+## When the server can't be reached
+
+`pm` tries the server's addresses in `.pm.json` in order: `url`, then any `fallbackUrls` (say, the home address first and a VPN address for when the computer is away). When none answers:
+
+- **Changes are saved, not lost.** `pm task create/update/status/advance/note/check/link/unlink`, `pm item` and `pm time start/stop/log` print `Saved offline: ...` and succeed (with `--json`: `{"savedOffline": true, ...}`). The next `pm` command that reaches the server sends them first, oldest first, and reports what it sent. Treat a saved change as done and **never run it again**: it would happen twice.
+- **A task created offline is `NEW_1`** (`NEW_2`, ...) until it's sent. Use that key in later commands meanwhile (`--parent NEW_1`, status changes, notes, time). When it's sent, the report says `NEW_1 is APP-45`; use the real key from then on.
+- **Timers run on this computer.** `pm time start` offline starts a local timer, `pm time status` shows it, and `pm time stop` logs it with its real start and length.
+- **Lookups need the server** (`task list/get`, `meta`, epochs, the diagram, files). They fail with "Cannot reach ..."; carry on with the coding work.
+- `pm queue` lists what's waiting, and any change the server **refused** when it was sent (a status that doesn't exist, a deleted task). Tell the user; fix the cause and `pm queue retry`, or `pm queue drop <id>`.
+- "Lost the connection ... may or may not have been made" means that change was **not** saved: once the server answers, check with `pm task get` before repeating it.
+
 ## Rules
 
 - Never delete tasks, epochs, folders, files, time entries, categories, types or projects unless the user explicitly asks.
-- Never invent task keys — always read them from command output.
-- If the server is unreachable, continue the coding work, tell the user tracking failed, and list the `pm` commands they (or you, later) should run to catch up.
+- Never invent task keys — always read them from command output (a `NEW_n` key from `Saved offline` output counts).
+- If the server is unreachable, continue the coding work and tell the user tracking is offline: changes are saved and sent later (see above), and lookups wait until it's back.
 - Use `--json` when you need to parse output programmatically.
 
 <!-- Part of Project Manager. Copyright (c) 2026 Bettafish Games, LLC. MIT License. -->

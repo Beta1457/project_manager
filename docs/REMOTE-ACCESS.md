@@ -209,18 +209,20 @@ The commands below are for the server. On Windows, run them in PowerShell as the
 
    - Use `serve`, never `funnel`: Funnel would put the app on the public internet.
    - No firewall rule is needed: Tailscale hands each connection to the app on the server itself (`127.0.0.1`). The Project Manager believes the forwarded headers of a proxy on the same computer, and only that, so it still knows which device connected and that it used HTTPS. Another reverse proxy on the same computer, like Caddy, works the same way.
-6. **Limit your devices to the Project Manager.** By default, every device on your Tailscale network can reach every port on every other device. Find the server's Tailscale address with `tailscale ip -4`, then in the admin console open **Access controls** and replace the default rules with a single grant, with that address in place of `100.101.102.103`:
+6. **Limit your devices to the Project Manager.** By default, every device on your Tailscale network can reach every port on every other device. Find the server's two Tailscale addresses (one IPv4, one IPv6) with `tailscale ip`. Then in the admin console open **Access controls** and replace the default rules with a single grant, with those addresses in place of the examples:
 
    ```json
    {
      "grants": [
-       { "src": ["autogroup:member"], "dst": ["100.101.102.103"], "ip": ["tcp:443"] }
+       { "src": ["autogroup:member"], "dst": ["100.101.102.103", "fd7a:115c:a1e0::1234:5678"], "ip": ["tcp:443"] }
      ]
    }
    ```
 
-   Port 443 is the HTTPS address from step 5. If you use Tailscale for other things too, keep rules for those as well.
+   Port 443 is the HTTPS address from step 5. Devices normally connect over IPv4. Listing the IPv6 address too keeps the address working on a device that tries IPv6 first, because a rule for one address doesn't cover the other. If you use Tailscale for other things too, keep rules for those as well.
 7. **Test it:** on the phone, with Wi-Fi off and Tailscale on, open the address from step 5 and sign in.
+
+   **Address not found, although Tailscale is connected?** A browser with its own secure DNS setting asks the internet for the name instead of Tailscale, and the internet doesn't know it. Firefox's DNS over HTTPS does this, and other browsers' "secure DNS" options can too. Turn the setting off in that browser, or add an exception for `ts.net` where the browser offers one.
 8. **Your coding agent on another computer:** with Tailscale on there, re-run the installer in your code project, downloading it from the new address so it defaults to that address. It keeps your token and project. An agent on the server itself can keep the address it has.
 
    macOS / Linux:
@@ -234,5 +236,15 @@ The commands below are for the server. On Windows, run them in PowerShell as the
    ```powershell
    irm https://pm.tail1234.ts.net/integration/install.mjs -OutFile $env:TEMP\pm-install.mjs; node $env:TEMP\pm-install.mjs
    ```
+
+   **Or keep the home address and add Tailscale as a fallback**, for a computer that's often at home. In the code project's `.pm.json`, keep `url` and add the Tailscale address under `fallbackUrls`. The agent's `pm` tool tries the addresses in order, so at home it uses the home address and away it uses Tailscale:
+
+   ```json
+   { "url": "http://192.168.1.20:8080", "fallbackUrls": ["https://pm.tail1234.ts.net"], "token": "pm_...", "project": "APP" }
+   ```
+
+   Edit the file in a text editor; it holds your token, so don't paste its contents anywhere. The installer keeps `fallbackUrls` when you re-run it. An agent on the server itself doesn't need a fallback, because both addresses lead to the same app there.
+   - **The trade-off:** away from home, `pm` asks the home address first. Before it sends the token, it checks that the Project Manager answers there. A device on another network that is at the same address and pretends to be the Project Manager could still get the token, because plain HTTP can't prove who's answering. Put the Tailscale address first (as `url`) if that matters to you; it works at home too.
+   - **When no address answers** (say, while the server restarts), `pm` saves changes to tasks and time tracking and sends them once it can. See "Several addresses, and offline" in the README.
 
 To drop a lost device, remove it on the admin console's Machines page, and revoke its API token in **Settings → API tokens**.

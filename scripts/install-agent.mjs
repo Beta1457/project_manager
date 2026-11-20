@@ -255,6 +255,7 @@ async function main() {
   } catch {
     /* none yet */
   }
+  if (!saved || typeof saved !== 'object' || Array.isArray(saved)) saved = {};
   let token = flag('new-token') ? undefined : (process.env.PM_TOKEN ?? saved.token);
   const reused = Boolean(token) && token === saved.token;
   if (!token) {
@@ -304,8 +305,13 @@ async function main() {
   ok(`${project.key}  ${project.name}`);
 
   // ---- 6. Save the settings ---------------------------------------------------------------------
-  const cfg = { url, token, project: project.key };
-  if (JSON.stringify(cfg) !== JSON.stringify({ url: saved.url, token: saved.token, project: saved.project })) {
+  // Anything else already in the file is kept, like "fallbackUrls" (other addresses of the server, see pm help).
+  const cfg = { ...saved, url, token, project: project.key };
+  if (Array.isArray(cfg.fallbackUrls)) {
+    cfg.fallbackUrls = cfg.fallbackUrls.filter((u) => String(u).trim().replace(/\/+$/, '') !== url); // tried first anyway
+    if (!cfg.fallbackUrls.length) delete cfg.fallbackUrls;
+  }
+  if (JSON.stringify(cfg) !== JSON.stringify(saved)) {
     fs.writeFileSync(cfgPath, `${JSON.stringify(cfg, null, 2)}\n`, { mode: 0o600 });
     if (process.platform !== 'win32') fs.chmodSync(cfgPath, 0o600); // also when the file already existed
     ok('saved to .pm.json');
