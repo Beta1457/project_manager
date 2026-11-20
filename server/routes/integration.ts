@@ -28,8 +28,9 @@ export function registerIntegrationRoutes(app: FastifyInstance): void {
     const rel = Object.hasOwn(FILES, name) ? FILES[name] : undefined;
     if (!rel) throw notFound(`Integration file "${name}"`);
     let body: string | Buffer = await fs.readFile(path.join(repoRoot, rel));
-    // The installer defaults to the address it was downloaded from, so nobody has to type it.
-    const host = req.headers.host;
+    // The installer defaults to the address it was downloaded from, so nobody has to type it. Through a proxy on
+    // this computer (app.ts, trustProxy), that's the address the device used, https included.
+    const host = req.host;
     if (name === 'install.mjs' && host && PLAIN_HOST.test(host)) {
       body = body.toString('utf8').replace(URL_PLACEHOLDER, () => JSON.stringify(`${req.protocol}://${host}`));
     }

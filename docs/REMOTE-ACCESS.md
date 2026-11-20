@@ -5,7 +5,7 @@ The Project Manager speaks plain HTTP and is built for your own network. To use 
 Two ways to do it:
 
 - **[Option A: WireGuard on the server](#option-a-wireguard-on-the-server).** Fully self-hosted. You forward one UDP port on your router.
-- **[Option B: Tailscale](#option-b-tailscale).** No router changes, and it works even when your internet provider doesn't give you a public address. Needs a free Tailscale account.
+- **[Option B: Tailscale](#option-b-tailscale).** No router changes, it works even when your internet provider doesn't give you a public address, and the app gets an HTTPS address. Needs a free Tailscale account.
 
 ## Don't forward the app's port
 
@@ -19,7 +19,7 @@ A WireGuard port is different: WireGuard ignores every packet that isn't signed 
 
 Also leave your router's built-in **VPN server** feature off, if it has one. Those usually put connected devices on your whole home network, which is what this guide avoids.
 
-**HTTPS isn't needed here.** The VPN encrypts everything between your device and the server, and the tunnel ends on the server itself, so the plain-HTTP traffic never crosses a network unprotected.
+**Both options encrypt everything** between your device and the server, and the tunnel ends on the server itself, so even plain HTTP never crosses a network unprotected. Option B also gives the app an HTTPS address with a real certificate: browsers stop marking it "Not secure", and the session cookie is only ever sent over HTTPS.
 
 ## Which option?
 
@@ -29,8 +29,9 @@ Also leave your router's built-in **VPN server** feature off, if it has one. Tho
 | Works when your provider uses CGNAT (no public IPv4 address) | No | Yes |
 | Accounts and third parties | None | A Tailscale account; their servers only coordinate, your traffic is end-to-end encrypted |
 | Same address at home and away | Only if your router supports NAT loopback | Yes |
+| Address | `http://10.47.0.1:8080` | `https://pm.tail1234.ts.net`, with a real certificate |
 
-Before either option: the server must accept connections from other devices. That's the "Let phones and other computers on your network connect?" question in `npm run setup` (`PM_HOST=0.0.0.0` in `.env`).
+For Option A, the server must accept connections from other devices. That's the "Let phones and other computers on your network connect?" question in `npm run setup` (`PM_HOST=0.0.0.0` in `.env`). Option B works either way.
 
 ## Option A: WireGuard on the server
 
@@ -190,30 +191,48 @@ On the server, delete its `[Peer]` block from the tunnel and save. Also revoke i
 
 ## Option B: Tailscale
 
-[Tailscale](https://tailscale.com) builds the same kind of WireGuard tunnel for you, and gets through routers and CGNAT without any port forwarding.
+[Tailscale](https://tailscale.com) builds the same kind of WireGuard tunnel for you, and gets through routers and CGNAT without any port forwarding. Its **Serve** feature also gives the Project Manager an HTTPS address with a real certificate, like `https://pm.tail1234.ts.net`, the same at home and away. The free Personal plan is enough.
+
+The commands below are for the server. On Windows, run them in PowerShell as the Windows account that signed in to Tailscale; if PowerShell doesn't find `tailscale`, use `& "C:\Program Files\Tailscale\tailscale.exe"` instead.
 
 1. **Install Tailscale** on the server, the laptop and the phone ([tailscale.com/download](https://tailscale.com/download)), and sign in with the same account on each.
-2. **Keep the server connected.** On a Windows server, turn on **Run unattended** in Tailscale's menu (under Preferences) so it stays connected when nobody is signed in to Windows. In the Tailscale admin console, open the server's **⋯** menu on the Machines page and choose **Disable key expiry**, so it doesn't drop off the network after a few months.
-3. **Find the server's Tailscale address**, `100.x.y.z`. It's in Tailscale's menu on the server, or run `tailscale ip -4` there.
-4. **Allow it through the server's firewall** (Windows, Administrator PowerShell, in the Project Manager folder). Tailscale addresses are in `100.64.0.0/10`:
+2. **Keep the server connected.** On a Windows server, turn on unattended mode so Tailscale stays connected when nobody is signed in to Windows: right-click Tailscale's tray icon → **Preferences** → **Run unattended**, or run `tailscale set --unattended=true`. In the Tailscale admin console, open the server's **⋯** menu on the **Machines** page and choose **Disable key expiry**, so it doesn't drop off the network after 180 days.
+3. **Give the server a name you don't mind being public.** The name becomes part of the address, and every HTTPS certificate is recorded in public Certificate Transparency logs, name included. On the Machines page, open the server's **⋯** menu → **Edit machine name…** and pick something like `pm`. The rest of the address, like `tail1234.ts.net`, is your Tailscale network's name, shown on the admin console's **DNS** page.
+4. **Turn on HTTPS certificates:** on the admin console's **DNS** page, check that **MagicDNS** is on, then under **HTTPS Certificates** choose **Enable HTTPS**.
+5. **Serve the Project Manager** over HTTPS, with your Project Manager port:
 
    ```powershell
-   .\scripts\open-firewall.ps1 -VpnSubnet 100.64.0.0/10
+   tailscale serve --bg 8080
    ```
 
-   As with WireGuard, this also blocks every other port on the server for Tailscale devices.
-5. **Limit your devices to the Project Manager.** By default, every device on your Tailscale network can reach every port on every other device. In the admin console, open **Access controls** and replace the default rules with a single grant, using the server's address from step 3 and your Project Manager port:
+   It prints the address, `https://pm.tail1234.ts.net/`, and keeps serving in the background, also after restarts. The first visit can take a little longer while Tailscale gets the certificate. `tailscale serve status` shows what's served, and `tailscale serve reset` stops it.
+
+   - Use `serve`, never `funnel`: Funnel would put the app on the public internet.
+   - No firewall rule is needed: Tailscale hands each connection to the app on the server itself (`127.0.0.1`). The Project Manager believes the forwarded headers of a proxy on the same computer, and only that, so it still knows which device connected and that it used HTTPS. Another reverse proxy on the same computer, like Caddy, works the same way.
+6. **Limit your devices to the Project Manager.** By default, every device on your Tailscale network can reach every port on every other device. Find the server's Tailscale address with `tailscale ip -4`, then in the admin console open **Access controls** and replace the default rules with a single grant, with that address in place of `100.101.102.103`:
 
    ```json
    {
      "grants": [
-       { "src": ["autogroup:member"], "dst": ["100.101.102.103"], "ip": ["tcp:8080"] }
+       { "src": ["autogroup:member"], "dst": ["100.101.102.103"], "ip": ["tcp:443"] }
      ]
    }
    ```
 
-   If you use Tailscale for other things too, keep rules for those as well.
-6. **Test it:** on the phone, with Wi-Fi off and Tailscale on, open `http://100.x.y.z:8080`.
-7. **Your coding agent on the laptop:** re-run the installer through that address, as in [Your coding agent on the laptop](#your-coding-agent-on-the-laptop) with `100.x.y.z` in place of `10.47.0.1`. The Tailscale address works at home and away.
+   Port 443 is the HTTPS address from step 5. If you use Tailscale for other things too, keep rules for those as well.
+7. **Test it:** on the phone, with Wi-Fi off and Tailscale on, open the address from step 5 and sign in.
+8. **Your coding agent on another computer:** with Tailscale on there, re-run the installer in your code project, downloading it from the new address so it defaults to that address. It keeps your token and project. An agent on the server itself can keep the address it has.
+
+   macOS / Linux:
+
+   ```bash
+   curl -fsSL https://pm.tail1234.ts.net/integration/install.mjs -o /tmp/pm-install.mjs && node /tmp/pm-install.mjs
+   ```
+
+   Windows (PowerShell):
+
+   ```powershell
+   irm https://pm.tail1234.ts.net/integration/install.mjs -OutFile $env:TEMP\pm-install.mjs; node $env:TEMP\pm-install.mjs
+   ```
 
 To drop a lost device, remove it on the admin console's Machines page, and revoke its API token in **Settings → API tokens**.

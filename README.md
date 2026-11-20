@@ -172,7 +172,7 @@ The REST API is documented in [docs/API.md](docs/API.md).
 
 ## Using it away from home
 
-The server speaks plain HTTP and is meant for your own network. **Don't forward its port on your router**, not even on an unusual port. To reach it from a laptop or phone while travelling, use a VPN that ends on the server: [docs/REMOTE-ACCESS.md](docs/REMOTE-ACCESS.md) walks through WireGuard and Tailscale, set up so that only this app is reachable rather than your whole network.
+The server speaks plain HTTP and is meant for your own network. **Don't forward its port on your router**, not even on an unusual port. To reach it from a laptop or phone while travelling, use a VPN that ends on the server: [docs/REMOTE-ACCESS.md](docs/REMOTE-ACCESS.md) walks through WireGuard and Tailscale, set up so that only this app is reachable rather than your whole network. Tailscale also gives it an HTTPS address.
 
 ## Keep it running
 

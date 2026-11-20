@@ -1912,6 +1912,55 @@ test('integration files are served without login from a fixed list only', async 
   }
 });
 
+test('behind a proxy on the same computer (like tailscale serve): HTTPS cookie and address, each device throttled on its own, nothing fakeable from the network', async () => {
+  // The proxy connects from 127.0.0.1 (the inject default) and says which device connected to it, and how.
+  const via = (device: string, more: Record<string, string> = {}) => ({ 'x-forwarded-for': device, 'x-forwarded-proto': 'https', ...more });
+  const send = (method: 'GET' | 'POST', url: string, headers: Record<string, string>, remoteAddress?: string, payload?: Json) =>
+    app.inject({ method, url, headers, ...(remoteAddress ? { remoteAddress } : {}), ...(payload ? { payload } : {}) });
+  const login = (password: string, headers: Record<string, string> = {}, remoteAddress?: string) =>
+    send('POST', '/api/auth/login', headers, remoteAddress, { username: 'alice', password });
+  const setCookie = (r: { headers: Record<string, unknown> }) => String([r.headers['set-cookie']].flat()[0]);
+  const secure = (r: { headers: Record<string, unknown> }) => setCookie(r).split(';').some((a) => a.trim().toLowerCase() === 'secure');
+
+  // Over HTTPS through the proxy, the session cookie is Secure. On the plain-HTTP address it can't be.
+  const proxied = await login('correct-horse', via('100.64.0.10'));
+  assert.equal(proxied.statusCode, 200);
+  assert.ok(secure(proxied), setCookie(proxied));
+  const plain = await login('correct-horse');
+  assert.equal(plain.statusCode, 200);
+  assert.ok(!secure(plain), setCookie(plain));
+  // Another computer on the network sending the same headers is just a plain-HTTP client.
+  const faked = await login('correct-horse', via('100.64.0.10'), '192.168.1.50');
+  assert.equal(faked.statusCode, 200);
+  assert.ok(!secure(faked), setCookie(faked));
+  // Logging out over HTTPS clears the cookie with the same settings.
+  const out = await send('POST', '/api/auth/logout', { ...via('100.64.0.10'), cookie: setCookie(proxied).split(';')[0], 'x-pm-client': 'web' });
+  assert.equal(out.statusCode, 200);
+  assert.match(setCookie(out), /^pm_session=;/);
+  assert.ok(secure(out), setCookie(out));
+
+  // The login throttle counts each device behind the proxy on its own...
+  for (let i = 0; i < 10; i++) assert.equal((await login('wrong', via('100.64.0.11'))).statusCode, 401);
+  assert.equal((await login('correct-horse', via('100.64.0.11'))).statusCode, 429);
+  assert.equal((await login('correct-horse', via('100.64.0.12'))).statusCode, 200);
+  // ...and a computer on the network can't escape its own count by claiming to be a different device each time.
+  for (let i = 0; i < 10; i++) assert.equal((await login('wrong', via(`100.64.1.${i}`), '192.168.1.60')).statusCode, 401);
+  assert.equal((await login('correct-horse', via('100.64.1.99'), '192.168.1.60')).statusCode, 429);
+
+  // The agent installer fetched through the proxy defaults to the HTTPS address the device used, also when the
+  // proxy passes the name in X-Forwarded-Host. From the network, those headers change nothing.
+  const installer = (headers: Record<string, string>, remoteAddress?: string) => send('GET', '/integration/install.mjs', headers, remoteAddress);
+  assert.match((await installer({ host: 'pm.example.ts.net', ...via('100.64.0.10') })).body, /const SERVED_FROM = "https:\/\/pm\.example\.ts\.net";/);
+  assert.match(
+    (await installer({ host: '127.0.0.1:8080', ...via('100.64.0.10', { 'x-forwarded-host': 'pm.example.ts.net' }) })).body,
+    /const SERVED_FROM = "https:\/\/pm\.example\.ts\.net";/,
+  );
+  assert.match(
+    (await installer({ host: '192.168.1.10:8080', ...via('100.64.0.10', { 'x-forwarded-host': 'evil.example' }) }, '192.168.1.50')).body,
+    /const SERVED_FROM = "http:\/\/192\.168\.1\.10:8080";/,
+  );
+});
+
 test('HTML preview: sandboxed, inlines files from its own folder, still needs a login', async () => {
   const readme = (await call('POST', '/api/v1/folders', { name: 'Readme' })).body;
   const images = (await call('POST', '/api/v1/folders', { name: 'images', parentId: readme.id })).body;

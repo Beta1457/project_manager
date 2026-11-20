@@ -42,7 +42,11 @@ export async function buildApp(config: AppConfig, opts: { dbFile?: string; logge
     logger: opts.logger ? { level: 'info' } : false,
     // The service log only rotates on restart, so skip per-request lines; errors are still logged.
     logController: new LogController({ disableRequestLogging: true }),
-    trustProxy: false,
+    // Believe X-Forwarded-For, -Proto and -Host only from a reverse proxy on this computer, like `tailscale serve`
+    // (docs/REMOTE-ACCESS.md). Behind one, req.ip is the device that connected to it, so the login throttle counts
+    // each device on its own, and req.protocol says whether that device used HTTPS. Clients on the network
+    // connect directly, so they can't fake these headers.
+    trustProxy: 'loopback',
     bodyLimit: 2 * 1024 * 1024,
     ajv: { customOptions: { allowUnionTypes: true } },
     // Live-update (SSE) connections never finish on their own; drop them on shutdown.

@@ -120,14 +120,16 @@ export function registerAuth(app: FastifyInstance, db: DB, bus: ChangeBus): void
   const throttle = new LoginThrottle();
   app.decorateRequest('auth', null);
 
+  /**
+   * The session cookie's settings. Reached over HTTPS (through a proxy like `tailscale serve`), it's Secure, so
+   * the browser never sends it over plain HTTP. Not on the plain-HTTP address, where browsers wouldn't keep it.
+   */
+  const cookieOptions = (reply: FastifyReply) =>
+    ({ path: '/', httpOnly: true, sameSite: 'lax', secure: reply.request.protocol === 'https' }) as const;
   const setSessionCookie = (reply: FastifyReply, token: string, remember: boolean) => {
-    reply.setCookie(SESSION_COOKIE, token, {
-      path: '/',
-      httpOnly: true,
-      sameSite: 'lax',
-      ...(remember ? { maxAge: REMEMBER_MS / 1000 } : {}),
-    });
+    reply.setCookie(SESSION_COOKIE, token, { ...cookieOptions(reply), ...(remember ? { maxAge: REMEMBER_MS / 1000 } : {}) });
   };
+  const clearSessionCookie = (reply: FastifyReply) => reply.clearCookie(SESSION_COOKIE, cookieOptions(reply));
 
   // Auth decisions use the *matched route pattern*, never the raw URL: the router decodes and
   // normalises paths ("/%61pi/...", absolute-form "http://host/api/..."), so a raw-URL prefix
@@ -165,7 +167,7 @@ export function registerAuth(app: FastifyInstance, db: DB, bus: ChangeBus): void
       .get(hash) as { user_id: number; remember: number; expires_at: number; username: string; is_admin: number } | undefined;
     if (!row || row.expires_at < Date.now()) {
       if (row) db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(hash);
-      reply.clearCookie(SESSION_COOKIE, { path: '/' });
+      clearSessionCookie(reply);
       return;
     }
     // Sliding expiry for "remember me" sessions so phones stay logged in.
@@ -238,7 +240,7 @@ export function registerAuth(app: FastifyInstance, db: DB, bus: ChangeBus): void
   app.post('/api/auth/logout', async (req, reply) => {
     const cookie = req.cookies[SESSION_COOKIE];
     if (cookie) db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(sha256(cookie));
-    reply.clearCookie(SESSION_COOKIE, { path: '/' });
+    clearSessionCookie(reply);
     return { ok: true };
   });
 
@@ -264,7 +266,7 @@ export function registerAuth(app: FastifyInstance, db: DB, bus: ChangeBus): void
       if (!verifyPassword(req.body.currentPassword, row.password_hash)) throw badRequest('Current password is incorrect');
       setPassword(db, auth.userId, req.body.newPassword);
       bus.markDirty();
-      reply.clearCookie(SESSION_COOKIE, { path: '/' });
+      clearSessionCookie(reply);
       return { ok: true, message: 'Password changed. Please log in again.' };
     },
   );
